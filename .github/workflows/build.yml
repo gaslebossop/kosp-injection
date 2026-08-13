@@ -1,0 +1,56 @@
+name: Build & Publish Kosp Injection
+
+# A chaque push sur main : compile l'exe Windows (runtime C en statique,
+# voir .cargo/config.toml — pas besoin de VCRUNTIME140.dll sur le poste
+# cible) et publie directement la nouvelle version sur le launcher de
+# production, en maj forcee, avec le message du commit comme notes de
+# version.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Empaqueter l'exe
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/twitninf-updater.exe -DestinationPath kosp-win32.zip -Force
+
+      - name: Publier sur le launcher
+        shell: bash
+        env:
+          ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          API="http://51.210.11.74:8080/api/admin"
+          SLUG="kosp-injection"
+          VERSION="1.0.${{ github.run_number }}"
+
+          printf '%s' "$COMMIT_MSG" > notes.txt
+
+          curl -sf -X POST "$API/games" \
+            -H "x-admin-key: $ADMIN_KEY" -H "Content-Type: application/json" \
+            -d "{\"slug\":\"$SLUG\",\"name\":\"Kosp Injection\",\"tagline\":\"Installe et met a jour TwitNinf sur iPhone\",\"category\":\"Outil\",\"accentColor\":\"#FE2C55\",\"accentColor2\":\"#25F4EE\",\"minSupportedVersion\":\"$VERSION\",\"forceUpdate\":true}"
+          echo ""
+
+          curl -sf -X POST "$API/games/$SLUG/versions" \
+            -H "x-admin-key: $ADMIN_KEY" \
+            -F "file=@kosp-win32.zip" \
+            -F "version=$VERSION" \
+            -F "executable=twitninf-updater.exe" \
+            -F "platform=win32" \
+            -F "notes=@notes.txt"
+          echo ""
