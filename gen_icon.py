@@ -1,37 +1,44 @@
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import os
 
 os.makedirs("icons", exist_ok=True)
 
 SIZE = 256
-img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-draw = ImageDraw.Draw(img)
+PAD = 26  # marge autour de la seringue dans le cadre
 
-# Fond arrondi degrade magenta, comme .brand-mark de l'UI
-radius = 60
-for y in range(SIZE):
-    t = y / SIZE
-    r = int(254 * (1 - t) + 201 * t)
-    g = int(44 * (1 - t) + 31 * t)
-    b = int(85 * (1 - t) + 68 * t)
-    draw.line([(0, y), (SIZE, y)], fill=(r, g, b, 255))
+src = Image.open("icons/source.png").convert("RGBA")
 
+# Rend le blanc transparent (fond uni du PNG source) pour ne garder que
+# la seringue, puis recadre sur son contour reel.
+datas = src.getdata()
+new_data = []
+for r, g, b, a in datas:
+    if r > 245 and g > 245 and b > 245:
+        new_data.append((r, g, b, 0))
+    else:
+        new_data.append((r, g, b, a))
+src.putdata(new_data)
+bbox = src.getbbox()
+src = src.crop(bbox)
+
+# Redimensionne pour tenir dans le cadre avec la marge, en conservant le
+# ratio (la seringue est en diagonale, donc plus large que haute).
+inner = SIZE - 2 * PAD
+scale = min(inner / src.width, inner / src.height)
+resized = src.resize((int(src.width * scale), int(src.height * scale)), Image.LANCZOS)
+
+# Fond arrondi presque noir (identique au reste de la DA de l'app) avec
+# la seringue centree dessus.
+bg = Image.new("RGBA", (SIZE, SIZE), (10, 10, 10, 255))
 mask = Image.new("L", (SIZE, SIZE), 0)
-ImageDraw.Draw(mask).rounded_rectangle([0, 0, SIZE, SIZE], radius=radius, fill=255)
-bg = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-bg.paste(img, (0, 0), mask)
+from PIL import ImageDraw
+ImageDraw.Draw(mask).rounded_rectangle([0, 0, SIZE, SIZE], radius=60, fill=255)
+rounded_bg = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+rounded_bg.paste(bg, (0, 0), mask)
 
-draw = ImageDraw.Draw(bg)
-try:
-    font = ImageFont.truetype("segoeuib.ttf", 96)
-except Exception:
-    font = ImageFont.load_default()
+offset = ((SIZE - resized.width) // 2, (SIZE - resized.height) // 2)
+rounded_bg.paste(resized, offset, resized)
 
-text = "TN"
-bbox = draw.textbbox((0, 0), text, font=font)
-tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-draw.text(((SIZE - tw) / 2 - bbox[0], (SIZE - th) / 2 - bbox[1]), text, font=font, fill=(255, 255, 255, 255))
-
-bg.save("icons/icon.png")
-bg.save("icons/icon.ico", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+rounded_bg.save("icons/icon.png")
+rounded_bg.save("icons/icon.ico", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 print("icone generee")

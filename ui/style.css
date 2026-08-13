@@ -71,14 +71,8 @@ html, body {
   width: 44px;
   height: 44px;
   border-radius: 13px;
-  background: linear-gradient(135deg, var(--magenta), #c91f44);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 15px;
-  letter-spacing: 0.02em;
-  box-shadow: 0 6px 22px rgba(254, 44, 85, 0.4);
+  object-fit: cover;
+  box-shadow: 0 6px 22px rgba(37, 244, 238, 0.3);
 }
 .brand-text h1 {
   margin: 0;
