@@ -41,16 +41,17 @@ jobs:
 
           printf '%s' "$COMMIT_MSG" > notes.txt
 
-          curl -sf -X POST "$API/games" \
+          # -w affiche le code HTTP meme en cas d'echec, et sans -f la
+          # reponse (souvent un message d'erreur JSON explicite) reste
+          # visible dans les logs au lieu d'etre avalee.
+          curl -s -w "\nHTTP %{http_code}\n" -X POST "$API/games" \
             -H "x-admin-key: $ADMIN_KEY" -H "Content-Type: application/json" \
             -d "{\"slug\":\"$SLUG\",\"name\":\"Kosp Injection\",\"tagline\":\"Installe et met a jour TwitNinf sur iPhone\",\"category\":\"Outil\",\"accentColor\":\"#FE2C55\",\"accentColor2\":\"#25F4EE\",\"minSupportedVersion\":\"$VERSION\",\"forceUpdate\":true}"
-          echo ""
 
-          curl -sf -X POST "$API/games/$SLUG/versions" \
+          curl -s -w "\nHTTP %{http_code}\n" -X POST "$API/games/$SLUG/versions" \
             -H "x-admin-key: $ADMIN_KEY" \
             -F "file=@kosp-win32.zip" \
             -F "version=$VERSION" \
             -F "executable=twitninf-updater.exe" \
             -F "platform=win32" \
-            -F "notes=@notes.txt"
-          echo ""
+            -F "notes=<notes.txt"
