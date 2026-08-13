@@ -71,9 +71,49 @@ struct PendingInputs {
     cancel_tx: Mutex<Option<oneshot::Sender<()>>>,
     confirm_tx: Mutex<Option<oneshot::Sender<bool>>>,
     device_tx: Mutex<Option<oneshot::Sender<String>>>,
+    account_tx: Mutex<Option<oneshot::Sender<Option<String>>>>,
     credentials_tx: Mutex<Option<oneshot::Sender<(String, String)>>>,
     twofa_tx: Mutex<Option<oneshot::Sender<TwoFactorCallbackResponse>>>,
     certs_tx: Mutex<Option<std::sync::mpsc::Sender<Vec<String>>>>,
+}
+
+/// Comptes Apple enregistres, avec mot de passe, dans le Gestionnaire
+/// d'identification Windows (chiffre par DPAPI, lie au compte utilisateur
+/// — pas de fichier en clair sur le disque). "account_list" garde la
+/// liste des identifiants connus ; "password/<apple_id>" le mot de passe
+/// de chacun, en entrees separees.
+fn list_accounts(keyring: &KeyringStorage) -> Vec<String> {
+    keyring
+        .retrieve("account_list")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn get_saved_password(keyring: &KeyringStorage, apple_id: &str) -> Option<String> {
+    keyring.retrieve(&format!("password/{apple_id}")).ok().flatten()
+}
+
+fn save_account(
+    keyring: &KeyringStorage,
+    apple_id: &str,
+    password: &str,
+) -> std::result::Result<(), Report> {
+    let mut accounts = list_accounts(keyring);
+    if !accounts.iter().any(|a| a == apple_id) {
+        accounts.push(apple_id.to_string());
+    }
+    keyring
+        .store(
+            "account_list",
+            &serde_json::to_string(&accounts).context("serialisation de la liste des comptes")?,
+        )
+        .context("enregistrement de la liste des comptes")?;
+    keyring
+        .store(&format!("password/{apple_id}"), password)
+        .context("enregistrement du mot de passe")?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -100,6 +140,7 @@ fn submit_cancel(state: State<PendingInputs>) {
     }
     state.confirm_tx.lock().unwrap().take();
     state.device_tx.lock().unwrap().take();
+    state.account_tx.lock().unwrap().take();
     state.credentials_tx.lock().unwrap().take();
     state.twofa_tx.lock().unwrap().take();
     state.certs_tx.lock().unwrap().take();
@@ -109,6 +150,15 @@ fn submit_cancel(state: State<PendingInputs>) {
 fn submit_device(state: State<PendingInputs>, udid: String) {
     if let Some(tx) = state.device_tx.lock().unwrap().take() {
         let _ = tx.send(udid);
+    }
+}
+
+/// `apple_id: None` = « ajouter un nouveau compte » (choisi dans le
+/// selecteur multi-compte), pas un compte existant.
+#[tauri::command]
+fn submit_account_choice(state: State<PendingInputs>, apple_id: Option<String>) {
+    if let Some(tx) = state.account_tx.lock().unwrap().take() {
+        let _ = tx.send(apple_id);
     }
 }
 
@@ -255,12 +305,36 @@ async fn run_update(app: AppHandle) -> std::result::Result<(), Report> {
     let provider = device.to_provider(UsbmuxdAddr::default(), "twitninf-updater");
 
     let keyring = KeyringStorage::new(KEYRING_SERVICE.to_string());
-    let existing_id = keyring.retrieve("apple_id").unwrap_or(None);
+    let accounts = list_accounts(&keyring);
 
-    let (tx, rx) = oneshot::channel();
-    *app.state::<PendingInputs>().credentials_tx.lock().unwrap() = Some(tx);
-    app.emit("need-password", serde_json::json!({ "appleId": existing_id })).ok();
-    let (apple_id, password) = rx.await.context("saisie des identifiants annulee")?;
+    // Un seul compte connu : connexion directe avec le mot de passe
+    // enregistre, aucune fenetre a montrer. Plusieurs : selecteur rapide
+    // (avec une option "ajouter un compte"). Aucun : ecran de saisie
+    // classique, comme au tout premier lancement.
+    let chosen_existing = if accounts.len() == 1 {
+        Some(accounts[0].clone())
+    } else if accounts.is_empty() {
+        None
+    } else {
+        let (tx, rx) = oneshot::channel();
+        *app.state::<PendingInputs>().account_tx.lock().unwrap() = Some(tx);
+        app.emit("need-account", &accounts).ok();
+        rx.await.context("choix du compte annule")?
+    };
+
+    let (apple_id, password) = match chosen_existing {
+        Some(id) => {
+            let pw = get_saved_password(&keyring, &id)
+                .context("mot de passe enregistre introuvable pour ce compte")?;
+            (id, pw)
+        }
+        None => {
+            let (tx, rx) = oneshot::channel();
+            *app.state::<PendingInputs>().credentials_tx.lock().unwrap() = Some(tx);
+            app.emit("need-password", serde_json::json!({ "appleId": null })).ok();
+            rx.await.context("saisie des identifiants annulee")?
+        }
+    };
 
     app.emit("status", "Connexion au compte Apple...").ok();
     let app_for_2fa = app.clone();
@@ -282,9 +356,7 @@ async fn run_update(app: AppHandle) -> std::result::Result<(), Report> {
         .await
         .context("identifiants incorrects ou 2FA refuse")?;
 
-    keyring
-        .store("apple_id", &apple_id)
-        .context("ecriture de la session")?;
+    save_account(&keyring, &apple_id, &password).context("enregistrement du compte")?;
 
     let dev_session = DeveloperSession::from_account(&mut account)
         .await
@@ -543,6 +615,7 @@ fn main() {
             submit_cancel,
             submit_confirm,
             submit_device,
+            submit_account_choice,
             submit_credentials,
             submit_2fa,
             submit_cert_choice,

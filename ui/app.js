@@ -26,6 +26,11 @@ const els = {
   deviceList: document.getElementById("device-list"),
   btnCancelDevice: document.getElementById("btn-cancel-device"),
 
+  overlayAccount: document.getElementById("overlay-account"),
+  accountList: document.getElementById("account-list"),
+  btnAddAccount: document.getElementById("btn-add-account"),
+  btnCancelAccount: document.getElementById("btn-cancel-account"),
+
   overlayPassword: document.getElementById("overlay-password"),
   modalSubId: document.getElementById("modal-sub-id"),
   inputAppleId: document.getElementById("input-apple-id"),
@@ -46,7 +51,7 @@ const els = {
 };
 
 function hideAllOverlays() {
-  for (const o of [els.overlayPrereqs, els.overlayDevice, els.overlayPassword, els.overlay2fa, els.overlayCerts]) {
+  for (const o of [els.overlayPrereqs, els.overlayDevice, els.overlayAccount, els.overlayPassword, els.overlay2fa, els.overlayCerts]) {
     o.classList.add("hidden");
   }
 }
@@ -88,6 +93,7 @@ els.btnStart.addEventListener("click", startUpdate);
 els.btnAgain.addEventListener("click", startUpdate);
 els.btnCancelProgress.addEventListener("click", cancelUpdate);
 els.btnCancelDevice.addEventListener("click", cancelUpdate);
+els.btnCancelAccount.addEventListener("click", cancelUpdate);
 els.btnCancelPassword.addEventListener("click", cancelUpdate);
 els.btnCancel2fa.addEventListener("click", cancelUpdate);
 els.btnCancelCerts.addEventListener("click", cancelUpdate);
@@ -142,6 +148,34 @@ listen("need-prereqs", (e) => {
   els.prereqsMessage.textContent = e.payload.message;
   els.prereqsDetail.textContent = e.payload.detail;
   els.overlayPrereqs.classList.remove("hidden");
+});
+
+// --- Choix de compte Apple ---
+els.btnAddAccount.addEventListener("click", () => {
+  els.overlayAccount.classList.add("hidden");
+  invoke("submit_account_choice", { appleId: null });
+});
+listen("need-account", (e) => {
+  els.accountList.innerHTML = "";
+  for (const id of e.payload) {
+    const item = document.createElement("div");
+    item.className = "cert-item";
+
+    const text = document.createElement("div");
+    text.className = "cert-item-text";
+    const name = document.createElement("span");
+    name.className = "cert-item-name";
+    name.textContent = id;
+    text.appendChild(name);
+    item.appendChild(text);
+
+    item.addEventListener("click", () => {
+      els.overlayAccount.classList.add("hidden");
+      invoke("submit_account_choice", { appleId: id });
+    });
+    els.accountList.appendChild(item);
+  }
+  els.overlayAccount.classList.remove("hidden");
 });
 
 // --- Choix d'appareil ---
