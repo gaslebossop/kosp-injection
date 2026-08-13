@@ -7,7 +7,7 @@ name: Build & Publish Kosp Injection
 # version.
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
