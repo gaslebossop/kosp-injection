@@ -351,6 +351,67 @@ async fn run_update(app: AppHandle) -> std::result::Result<(), Report> {
 /// affiches), puis Windows demande lui-meme l'elevation UAC pour
 /// l'installation — deux confirmations distinctes, aucune saisie de mot
 /// de passe systeme requise.
+/// WinGet est absent sur certaines images minimales (constate sous Windows
+/// Sandbox), meme s'il est integre d'office a un vrai poste Windows 10/11
+/// a jour. Ses dependances (VCLibs, Windows App Runtime) le sont donc
+/// aussi, et doivent correspondre EXACTEMENT a la version de WinGet
+/// installee — les liens generiques (aka.ms/Microsoft.VCLibs...) servent
+/// parfois une version trop ancienne, ce que Add-AppxPackage rejette avec
+/// un message qui donne l'impression que rien n'a ete installe.
+///
+/// Source fiable : chaque release GitHub de winget-cli embarque dans
+/// `DesktopAppInstaller_Dependencies.zip` les .appx de VCLibs et Windows
+/// App Runtime a la version exacte qu'elle requiert — memes releases,
+/// garanties compatibles entre elles, pas de devinette de version.
+async fn ensure_winget(app: &AppHandle) -> std::result::Result<(), Report> {
+    let present = tokio::process::Command::new("winget")
+        .arg("--version")
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if present {
+        return Ok(());
+    }
+
+    app.emit("status", "Installation de WinGet et de ses dependances...").ok();
+    let work_dir = std::env::temp_dir().join("kosp-winget-deps");
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$work = '{work}'
+New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest'
+$depsAsset = $release.assets | Where-Object {{ $_.name -eq 'DesktopAppInstaller_Dependencies.zip' }}
+$bundleAsset = $release.assets | Where-Object {{ $_.name -like '*.msixbundle' }}
+
+$depsZip = Join-Path $work 'deps.zip'
+Invoke-WebRequest -Uri $depsAsset.browser_download_url -OutFile $depsZip
+Expand-Archive -Path $depsZip -DestinationPath $work -Force
+
+Get-ChildItem -Path (Join-Path $work 'x64') -Filter '*.appx' | ForEach-Object {{
+    Add-AppxPackage -Path $_.FullName -ErrorAction Stop
+}}
+
+$bundlePath = Join-Path $work 'winget.msixbundle'
+Invoke-WebRequest -Uri $bundleAsset.browser_download_url -OutFile $bundlePath
+Add-AppxPackage -Path $bundlePath -ErrorAction Stop
+"#,
+        work = work_dir.display()
+    );
+    let status = tokio::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .status()
+        .await
+        .context("installation de WinGet et de ses dependances")?;
+    if !status.success() {
+        None::<()>.context("echec de l'installation de WinGet ou de ses dependances")?;
+    }
+    Ok(())
+}
+
 async fn ensure_apple_drivers(app: &AppHandle) -> std::result::Result<(), Report> {
     if UsbmuxdConnection::default().await.is_ok() {
         return Ok(());
@@ -371,6 +432,8 @@ async fn ensure_apple_drivers(app: &AppHandle) -> std::result::Result<(), Report
         None::<()>.context("pilotes Apple requis — installation refusee")?;
     }
 
+    ensure_winget(&app).await?;
+
     app.emit(
         "status",
         "Installation d'Apple Mobile Device Support (autorise l'invite Windows si elle apparait)...",
@@ -381,13 +444,21 @@ async fn ensure_apple_drivers(app: &AppHandle) -> std::result::Result<(), Report
             "install",
             "--id",
             "Apple.AppleMobileDeviceSupport",
+            // --source winget : sans ca, winget interroge aussi la source
+            // msstore, qui exige d'accepter ses propres conditions
+            // d'utilisation au premier lancement — un prompt interactif
+            // qui n'a personne pour y repondre en silencieux, et fait
+            // echouer toute la recherche au lieu d'utiliser la source
+            // winget classique ou le paquet existe deja.
+            "--source",
+            "winget",
             "--accept-source-agreements",
             "--accept-package-agreements",
             "--silent",
         ])
         .status()
         .await
-        .context("lancement de winget — winget est-il installe sur ce PC ?")?;
+        .context("lancement de winget")?;
     if !status.success() {
         None::<()>.context("installation refusee ou echouee (invite Windows refusee ?)")?;
     }
@@ -409,7 +480,57 @@ async fn wait_2fa(
     Ok(rx.await.context("saisie du code 2FA annulee")?)
 }
 
+/// Le WebView2 Runtime (moteur d'affichage de Tauri) n'est pas toujours
+/// present sur un PC — absent par defaut sur une image minimale comme
+/// Windows Sandbox, meme s'il l'est presque toujours sur un vrai poste
+/// Windows 10/11 a jour. Contrairement aux pilotes Apple, ce n'est pas
+/// optionnel : sans lui, Tauri ne peut meme pas creer sa fenetre, donc
+/// impossible de demander confirmation via l'interface — on l'installe
+/// silencieusement avant de tenter de demarrer.
+fn webview2_installed() -> bool {
+    const KEY_PATH: &str =
+        r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    ["HKLM", "HKCU"].iter().any(|root| {
+        std::process::Command::new("reg")
+            .args(["query", &format!("{root}\\{KEY_PATH}"), "/v", "pv"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn ensure_webview2() {
+    if webview2_installed() {
+        return;
+    }
+    // Bootstrapper Evergreen officiel Microsoft (lien stable documente) :
+    // quelques Mo, installe la vraie runtime silencieusement.
+    let installer = std::env::temp_dir().join("MicrosoftEdgeWebview2Setup.exe");
+    let downloaded = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'",
+                installer.display()
+            ),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if downloaded {
+        let _ = std::process::Command::new(&installer)
+            .args(["/silent", "/install"])
+            .status();
+    }
+    // Si l'installation echoue malgre tout, Tauri affichera son propre
+    // message d'erreur natif au moment de creer la fenetre — pas besoin
+    // de dupliquer cette gestion ici.
+}
+
 fn main() {
+    ensure_webview2();
+
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("installation du fournisseur crypto rustls");
