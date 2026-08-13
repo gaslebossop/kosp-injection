@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Kosp Injection</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="halo halo-a"></div>
+  <div class="halo halo-b"></div>
+
+  <main class="shell">
+    <header class="brand">
+      <div class="brand-mark">TN</div>
+      <div class="brand-text">
+        <h1>Kosp Injection</h1>
+        <p>Installation &amp; mise a jour via Kosp Injection</p>
+      </div>
+    </header>
+
+    <section class="card" id="card-idle">
+      <p class="lede">Recupere la derniere version publiee et l'installe sur l'iPhone branche.</p>
+      <button class="btn btn-primary" id="btn-start">Mettre a jour TwitNinf</button>
+      <p class="hint">iPhone branche en USB, ecran deverrouille.</p>
+    </section>
+
+    <section class="card hidden" id="card-progress">
+      <div class="status-row">
+        <div class="spinner" id="spinner"></div>
+        <p class="status-text" id="status-text">Demarrage...</p>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <p class="progress-pct" id="progress-pct"></p>
+      <button class="btn btn-ghost" id="btn-cancel-progress">Annuler</button>
+    </section>
+
+    <section class="card hidden" id="card-result">
+      <div class="result-icon" id="result-icon"></div>
+      <p class="result-text" id="result-text"></p>
+      <button class="btn btn-ghost" id="btn-again">Relancer</button>
+    </section>
+  </main>
+
+  <div class="overlay hidden" id="overlay-prereqs">
+    <div class="modal">
+      <h2>Composants Apple manquants</h2>
+      <p class="modal-sub" id="prereqs-message"></p>
+      <p class="modal-sub" id="prereqs-detail"></p>
+      <button class="btn btn-primary" id="btn-prereqs-yes">Installer automatiquement</button>
+      <button class="btn btn-ghost" id="btn-prereqs-no">Annuler</button>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="overlay-device">
+    <div class="modal">
+      <h2>Plusieurs appareils detectes</h2>
+      <p class="modal-sub">Choisis celui a mettre a jour.</p>
+      <div class="cert-list" id="device-list"></div>
+      <button class="btn btn-ghost" id="btn-cancel-device">Annuler</button>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="overlay-password">
+    <div class="modal">
+      <h2>Connexion Apple ID</h2>
+      <p class="modal-sub" id="modal-sub-id">Identifiants du compte Apple gratuit utilise pour signer l'app.</p>
+      <input class="field" type="email" id="input-apple-id" placeholder="Apple ID" autocomplete="off" />
+      <input class="field" type="password" id="input-password" placeholder="Mot de passe" autocomplete="off" />
+      <button class="btn btn-primary" id="btn-submit-password">Continuer</button>
+      <button class="btn btn-ghost" id="btn-cancel-password">Annuler</button>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="overlay-2fa">
+    <div class="modal">
+      <h2>Code de verification</h2>
+      <p class="modal-sub">Entre le code recu sur tes appareils Apple.</p>
+      <input class="field field-code" type="text" inputmode="numeric" maxlength="6" id="input-2fa" placeholder="••••••" autocomplete="off" />
+      <button class="btn btn-primary" id="btn-submit-2fa">Valider</button>
+      <button class="btn btn-link" id="btn-resend-2fa">Renvoyer le code</button>
+      <button class="btn btn-ghost" id="btn-cancel-2fa">Annuler</button>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="overlay-certs">
+    <div class="modal modal-wide">
+      <h2>Limite de certificats atteinte</h2>
+      <p class="modal-sub">Choisis un certificat a revoquer pour liberer une place.</p>
+      <div class="cert-list" id="cert-list"></div>
+      <button class="btn btn-primary" id="btn-submit-certs">Revoquer et continuer</button>
+      <button class="btn btn-ghost" id="btn-cancel-certs">Annuler</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

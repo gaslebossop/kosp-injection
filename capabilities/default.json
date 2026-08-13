@@ -1,0 +1,9 @@
+{
+  "identifier": "default",
+  "description": "Permissions de la fenetre principale : ecoute des evenements et appel des commandes de l'app.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default"
+  ]
+}
