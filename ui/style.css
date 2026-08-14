@@ -184,6 +184,22 @@ body::before {
   border: 1px solid var(--line-strong);
 }
 
+/* --- Animation d'injection ---------------------------------------------- */
+
+/* La seule zone de l'ecran qui deroge au parti pris « instrument » : c'est
+ * l'illustration de marque, pas un element d'interface. Elle est cadrée net
+ * (pas de coin arrondi, un filet en bas comme les autres bandeaux) pour que
+ * la rupture porte sur le dessin, pas sur le contenant. */
+.injection-anim {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 172px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.014), transparent);
+  overflow: hidden;
+}
+
 /* --- Pipeline ----------------------------------------------------------- */
 
 .pipeline {

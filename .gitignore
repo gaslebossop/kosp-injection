@@ -1,4 +1,4 @@
-/target
+﻿/target
 /gen
 *.log
 icons/icon.png
@@ -7,3 +7,5 @@ kosp-win32.zip
 # doivent surtout pas vivre dans ui/ : ce dossier est embarque tel quel
 # dans l'executable, page de test comprise.
 /dev
+# Page de reglage autonome, reconstruite par art/injection/build.ps1.
+/art/injection/animation-logo.html

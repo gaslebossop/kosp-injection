@@ -23,6 +23,11 @@
       <span class="dev-meta mono" id="dev-meta"></span>
     </div>
 
+    <!-- Tourne du lancement de l'injection jusqu'a son issue. Prend la place
+         des prerequis, masques des que ca demarre : ce qu'il y avait a lire
+         avant de lancer n'a plus lieu d'etre pendant. -->
+    <section class="injection-anim hidden" id="injection-anim"></section>
+
     <section class="prereq" id="prereq">
       <span class="sec-label">Avant de lancer</span>
       <ul>
@@ -146,6 +151,7 @@
     </div>
   </div>
 
+  <script src="injection-anim.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

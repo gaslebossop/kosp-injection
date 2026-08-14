@@ -51,6 +51,7 @@ const els = {
   devLabel: el("dev-label"),
   devMeta: el("dev-meta"),
   prereq: el("prereq"),
+  injectionAnim: el("injection-anim"),
   pipeline: el("pipeline"),
 
   statusText: el("status-text"),
@@ -128,6 +129,18 @@ const overlays = [
   els.overlay2fa,
   els.overlayCerts,
 ];
+
+/** L'animation de marque du bandeau, ou un objet inerte si le module n'a pas
+ *  ete charge. Une injection ne doit pas echouer parce qu'une illustration
+ *  manque : tout ce qui la concerne est optionnel. */
+// La scene est plus large que le bandeau : c'est le bandeau qui recadre. La
+// seringue traverse ainsi toute la largeur de la fenetre au lieu d'apparaitre
+// au coin d'un carre de 172 px, et le haut et le bas de la scene, vides, sont
+// simplement coupes.
+const injectionAnim =
+  (window.InjectionAnim &&
+    window.InjectionAnim.create(els.injectionAnim, { size: 210, loop: true })) ||
+  { play() {}, stop() {} };
 
 // Journal des etapes traversees. Sert au bouton « Copier le rapport » :
 // une erreur seule ne dit pas ou l'on en etait quand elle est tombee.
@@ -295,6 +308,14 @@ function setRunning(state) {
   els.btnStart.classList.toggle("hidden", state);
   els.btnCancel.classList.toggle("hidden", !state);
   els.prereq.classList.toggle("hidden", state);
+
+  // L'animation tourne exactement tant que l'injection tourne — depuis le
+  // clic jusqu'a l'echec, la reussite ou l'interruption. `stop()` vide la
+  // scene : rien ne continue a s'animer derriere un ecran de resultat.
+  els.injectionAnim.classList.toggle("hidden", !state);
+  if (state) injectionAnim.play();
+  else injectionAnim.stop();
+
   // Plus rien ne tourne : la question « fermer quand meme ? » n'a plus
   // lieu d'etre, la fermeture ne coupe plus rien.
   if (!state) els.overlayQuit.classList.add("hidden");

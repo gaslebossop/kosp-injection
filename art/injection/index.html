@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Injection — animation logo</title>
+<style>
+  /* Page de réglage : elle ne contient que les commandes. Toute l'animation
+     vit dans `injection-anim.js`, partagé avec Kosp Injection. */
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    font:500 13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    color:#5b6472;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:16px; background:#fff; overflow:hidden;
+  }
+  body[data-bg="dark"]{background:#0b0f1a; color:#7d879b}
+  body[data-bg="alpha"]{
+    background-image:
+      linear-gradient(45deg,#e6e9ee 25%,transparent 25%),
+      linear-gradient(-45deg,#e6e9ee 25%,transparent 25%),
+      linear-gradient(45deg,transparent 75%,#e6e9ee 75%),
+      linear-gradient(-45deg,transparent 75%,#e6e9ee 75%);
+    background-size:22px 22px;
+    background-position:0 0,0 11px,11px -11px,-11px 0;
+  }
+
+  #bar{
+    display:flex; gap:7px; align-items:center; flex-wrap:wrap; justify-content:center;
+    padding:7px 9px; border-radius:999px;
+    background:rgba(255,255,255,.78); border:1px solid rgba(20,30,60,.09);
+    backdrop-filter:blur(8px);
+  }
+  body[data-bg="dark"] #bar{background:rgba(255,255,255,.06); border-color:rgba(255,255,255,.12)}
+  button{
+    font:inherit; color:inherit; cursor:pointer; padding:7px 13px; border-radius:999px;
+    border:1px solid rgba(20,30,60,.12); background:#fff;
+    transition:transform .12s ease, box-shadow .12s ease;
+  }
+  body[data-bg="dark"] button{background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.14)}
+  button:hover{transform:translateY(-1px); box-shadow:0 4px 14px rgba(20,30,60,.12)}
+  button.primary{background:linear-gradient(135deg,#31BEFB,#9544FB); border-color:transparent; color:#fff; font-weight:600}
+  button[aria-pressed="true"]{
+    background:linear-gradient(135deg,rgba(49,190,251,.18),rgba(149,68,251,.18));
+    border-color:rgba(85,120,250,.5); color:#3b4b6b;
+  }
+  body[data-bg="dark"] button[aria-pressed="true"]{color:#cfe0ff}
+  .sep{width:1px; height:20px; background:rgba(20,30,60,.14)}
+</style>
+</head>
+<body data-bg="white">
+
+  <div id="host"></div>
+
+  <div id="bar">
+    <button class="primary" id="replay">↻ Rejouer</button>
+    <button id="loop" aria-pressed="true">Boucle</button>
+    <div class="sep"></div>
+    <button data-bg-btn="white" aria-pressed="true">Blanc</button>
+    <button data-bg-btn="alpha" aria-pressed="false">Transparent</button>
+    <button data-bg-btn="dark"  aria-pressed="false">Sombre</button>
+    <div class="sep"></div>
+    <button id="slow" aria-pressed="false">Ralenti</button>
+  </div>
+
+<script src="injection-anim.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = s => document.querySelector(s);
+  const anim = InjectionAnim.create($('#host'), { size: 720, loop: true });
+
+  let slow = false;
+
+  $('#replay').addEventListener('click', () => anim.play());
+
+  $('#loop').addEventListener('click', e => {
+    const next = !anim.isLooping();
+    e.currentTarget.setAttribute('aria-pressed', next);
+    anim.setLoop(next).play();
+  });
+
+  $('#slow').addEventListener('click', e => {
+    slow = !slow;
+    e.currentTarget.setAttribute('aria-pressed', slow);
+    anim.setRate(slow ? 0.3 : 1);
+  });
+
+  document.querySelectorAll('[data-bg-btn]').forEach(b => b.addEventListener('click', () => {
+    document.body.dataset.bg = b.dataset.bgBtn;
+    document.querySelectorAll('[data-bg-btn]').forEach(o => o.setAttribute('aria-pressed', o === b));
+  }));
+
+  function resize(){
+    anim.setSize(Math.min(innerWidth - 32, innerHeight - 120, 940));
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  anim.ready().then(() => requestAnimationFrame(() => anim.play()));
+})();
+</script>
+</body>
+</html>
