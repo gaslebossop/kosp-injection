@@ -60,6 +60,11 @@ body::before {
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .hidden { display: none !important; }
 
+/* Ecran de secours quand le script ne peut meme pas construire l'interface. */
+.fatal { padding: 40px 32px; }
+.fatal h2 { margin: 0 0 10px; font-size: 15px; }
+.fatal p { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text-dim); }
+
 .app {
   position: relative;
   z-index: 1;

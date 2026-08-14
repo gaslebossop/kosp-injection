@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Manifeste applicatif. Celui que Tauri genere par defaut se limite a la
+  dependance Common-Controls : Windows considere alors le programme comme
+  une vieille application, applique ses couches de compatibilite, et le
+  traite comme non compatible avec la mise a l'echelle de l'affichage.
+  Resultat sur un portable en 150 % (le reglage par defaut de la plupart
+  des 15 pouces 1080p) : l'interface est etiree par le systeme au lieu
+  d'etre dessinee nette.
+
+  Les trois ajouts :
+  - compatibility  : declare le support explicite de Windows 7 a 11, ce qui
+                     desactive les shims de compatibilite.
+  - dpiAware(ness) : per-monitor v2, la fenetre se redessine proprement au
+                     changement d'ecran ou de niveau de zoom.
+  - longPathAware  : les chemins de plus de 260 caracteres restent lisibles
+                     (dossier temporaire profond, nom d'utilisateur long).
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 et Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}" />
+      <!-- Windows 8 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}" />
+      <!-- Windows 7 -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}" />
+    </application>
+  </compatibility>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+
+  <!-- L'app n'a pas besoin des droits d'administrateur pour elle-meme :
+       elle ne les demande qu'au coup par coup, quand elle doit demarrer le
+       service Apple ou installer un pilote. Reclamer l'elevation au
+       lancement afficherait une alerte UAC a chaque ouverture. -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+</assembly>

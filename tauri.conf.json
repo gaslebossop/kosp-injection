@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kosp Injection",
-  "version": "0.1.0",
   "identifier": "com.gasleboss.twitninfupdater",
   "build": {
     "frontendDist": "ui"
@@ -13,19 +12,21 @@
         "title": "Kosp Injection",
         "width": 460,
         "height": 700,
-        "minWidth": 400,
-        "minHeight": 560,
+        "minWidth": 360,
+        "minHeight": 460,
         "resizable": true,
         "center": true,
         "decorations": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "publisher": "gasleboss",
+    "copyright": "Kosp Injection"
   }
 }

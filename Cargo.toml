@@ -1,21 +1,37 @@
 [package]
 name = "twitninf-updater"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+description = "Kosp Injection"
+authors = ["gasleboss"]
 
 [dependencies]
-dirs = "6.0.0"
 idevice = { version = "0.1.65", features = ["usbmuxd"] }
 isideload = "0.3.17"
-reqwest = { version = "0.13.4", features = ["blocking", "json"] }
+reqwest = { version = "0.13.4", features = ["json"] }
 rootcause = "0.12.1"
 rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tauri = { version = "2.11.5", features = ["devtools"] }
+tauri = "2.11.5"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 
 [build-dependencies]
 tauri-build = "2.6.3"
+
+[features]
+# Inspecteur WebView2 (clic droit > Inspecter). Utile pendant le
+# developpement — `cargo run --features debug-ui` — mais il n'a rien a
+# faire dans la version distribuee : il etait jusqu'ici actif en release,
+# ou n'importe qui pouvait ouvrir les outils de developpement de l'app.
+debug-ui = ["tauri/devtools"]
+
+[profile.release]
+# Binaire distribue par le launcher : autant qu'il soit compact. `thin`
+# plutot que `fat` pour ne pas faire exploser la duree de compilation en
+# integration continue.
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

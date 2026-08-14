@@ -41,6 +41,7 @@ use isideload::{
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
+use std::os::windows::process::CommandExt as _;
 use std::path::PathBuf;
 use std::sync::{
     Mutex, MutexGuard,
@@ -69,6 +70,58 @@ const DEVICE_TIMEOUT: Duration = Duration::from_secs(25);
 /// Apple verrouille un compte apres une poignee d'echecs — mieux vaut
 /// s'arreter nous-memes en l'expliquant que de faire bloquer le compte.
 const MAX_LOGIN_ATTEMPTS: usize = 3;
+/// CREATE_NO_WINDOW. Sans ce drapeau, chaque `sc`, `reg`, `powershell` ou
+/// `winget` lance ouvre une fenetre de console noire par-dessus l'app —
+/// l'app est compilee en sous-systeme "windows", elle n'a pas de console a
+/// reutiliser, Windows en cree donc une a chaque fois.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Prefixe commun aux scripts PowerShell lances par l'app. Windows
+/// PowerShell 5.1 des premieres versions de Windows 10 negocie encore en
+/// TLS 1.0 par defaut, que GitHub et Microsoft refusent : sans cette
+/// ligne, les telechargements echouent sur ces postes avec une erreur de
+/// connexion illisible.
+const PS_PRELUDE: &str = "$ErrorActionPreference = 'Stop'; \
+     $ProgressPreference = 'SilentlyContinue'; \
+     [Net.ServicePointManager]::SecurityProtocol = \
+     [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11; ";
+
+/// Commande systeme sans fenetre de console.
+fn hidden(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+/// Idem, version async. `kill_on_drop` est indispensable ici : quand
+/// l'utilisateur annule, la future qui attend le processus est abandonnee
+/// — sans ce reglage, le `winget`/`powershell` lance continuerait a
+/// tourner en fond apres la fermeture de l'app.
+fn hidden_async(program: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW).kill_on_drop(true);
+    cmd
+}
+
+/// Lance un script PowerShell non interactif, prelude compris.
+fn powershell(script: &str) -> tokio::process::Command {
+    let mut cmd = hidden_async("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &format!("{PS_PRELUDE}{script}"),
+    ]);
+    cmd
+}
+
+/// Un chemin Windows peut contenir une apostrophe (dossier utilisateur
+/// « O'Brien »). Insere tel quel dans un script PowerShell, il ferme la
+/// chaine en cours et casse le script — ou pire, y injecte du code.
+fn ps_quote(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
 
 #[derive(Deserialize)]
 struct AltStoreSource {
@@ -117,6 +170,11 @@ struct Failure {
     /// passe plutot que d'abandonner le flux.
     #[serde(skip)]
     retry_credentials: bool,
+    /// Interne : [`classify`] a reconnu la panne, le message affiche decrit
+    /// donc deja la vraie cause. Sert a ne pas redemander bêtement le mot
+    /// de passe quand l'echec de connexion venait du reseau.
+    #[serde(skip)]
+    classified: bool,
 }
 
 impl Failure {
@@ -127,6 +185,7 @@ impl Failure {
             detail: None,
             cancelled: false,
             retry_credentials: false,
+            classified: false,
         }
     }
 
@@ -137,11 +196,17 @@ impl Failure {
             detail: None,
             cancelled: true,
             retry_credentials: false,
+            classified: false,
         }
     }
 
     fn retryable(mut self) -> Self {
         self.retry_credentials = true;
+        self
+    }
+
+    fn classified(mut self) -> Self {
+        self.classified = true;
         self
     }
 
@@ -173,6 +238,7 @@ impl<T, E: std::fmt::Display> Explain<T> for Result<T, E> {
         self.map_err(|e| {
             let detail = e.to_string();
             classify(&detail)
+                .map(Failure::classified)
                 .unwrap_or_else(|| Failure::new(title, steps))
                 .with_detail(detail)
         })
@@ -201,21 +267,21 @@ fn classify(detail: &str) -> Option<Failure> {
     // --- Etat de l'iPhone -------------------------------------------------
     if any(&["developer mode is not enabled", "developermodenotenabled"]) {
         return Some(Failure::new(
-            "Le mode developpeur n'est pas active sur l'iPhone",
+            "Le mode développeur n'est pas activé sur l'iPhone",
             &[
-                "Sur l'iPhone : Reglages > Confidentialite et securite > Mode developpeur.",
-                "Active l'interrupteur, puis accepte le redemarrage de l'iPhone.",
-                "Apres le redemarrage, deverrouille l'iPhone et relance l'installation.",
-                "Si l'entree « Mode developpeur » n'apparait pas, laisse l'iPhone branche 30 s et rouvre les Reglages.",
+                "Sur l'iPhone : Réglages > Confidentialité et sécurité > Mode développeur.",
+                "Active l'interrupteur, puis accepte le redémarrage de l'iPhone.",
+                "Après le redémarrage, déverrouille l'iPhone et relance l'installation.",
+                "Si l'entrée « Mode développeur » n'apparaît pas, laisse l'iPhone branché 30 s et rouvre les Réglages.",
             ],
         ));
     }
     if any(&["passwordprotected", "devicelocked", "device locked", "device is locked"]) {
         return Some(Failure::new(
-            "L'iPhone est verrouille",
+            "L'iPhone est verrouillé",
             &[
-                "Deverrouille l'ecran de l'iPhone avec le code ou Face ID.",
-                "Laisse l'ecran allume pendant toute l'installation.",
+                "Déverrouille l'écran de l'iPhone avec le code ou Face ID.",
+                "Laisse l'écran allumé pendant toute l'installation.",
                 "Relance l'installation.",
             ],
         ));
@@ -224,7 +290,7 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "L'iPhone attend ta reponse",
             &[
-                "Regarde l'ecran de l'iPhone : la question « Se fier a cet ordinateur ? » est affichee.",
+                "Regarde l'écran de l'iPhone : la question « Se fier à cet ordinateur ? » est affichée.",
                 "Touche « Se fier », puis saisis le code de l'iPhone.",
                 "Relance l'installation.",
             ],
@@ -232,10 +298,10 @@ fn classify(detail: &str) -> Option<Failure> {
     }
     if has("userdeniedpairing") {
         return Some(Failure::new(
-            "L'autorisation a ete refusee sur l'iPhone",
+            "L'autorisation a été refusée sur l'iPhone",
             &[
-                "Debranche puis rebranche le cable USB.",
-                "Quand l'iPhone demande « Se fier a cet ordinateur ? », touche « Se fier ».",
+                "Débranche puis rebranche le câble USB.",
+                "Quand l'iPhone demande « Se fier à cet ordinateur ? », touche « Se fier ».",
                 "Saisis le code de l'iPhone si on te le demande, puis relance.",
             ],
         ));
@@ -248,10 +314,10 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "L'iPhone n'autorise pas encore ce PC",
             &[
-                "Deverrouille l'iPhone et laisse-le branche en USB.",
-                "Debranche puis rebranche le cable : la question « Se fier a cet ordinateur ? » doit apparaitre.",
+                "Déverrouille l'iPhone et laisse-le branché en USB.",
+                "Débranche puis rebranche le câble : la question « Se fier à cet ordinateur ? » doit apparaître.",
                 "Touche « Se fier » et saisis le code de l'iPhone.",
-                "Si la question n'apparait plus : Reglages > General > Transferer ou reinitialiser > Reinitialiser > Reinitialiser les reglages reseau et localisation, puis rebranche.",
+                "Si la question n'apparaît plus : Réglages > Général > Transférer ou réinitialiser > Réinitialiser > Réinitialiser les réglages réseau et localisation, puis rebranche.",
             ],
         ));
     }
@@ -259,8 +325,8 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "Limite de 3 apps atteinte pour ce compte Apple gratuit",
             &[
-                "Un compte Apple gratuit ne peut garder que 3 apps installees a la fois.",
-                "Sur l'iPhone, supprime une app installee avec ce meme compte.",
+                "Un compte Apple gratuit ne peut garder que 3 apps installées à la fois.",
+                "Sur l'iPhone, supprime une app installée avec ce même compte.",
                 "Relance l'installation.",
             ],
         ));
@@ -269,17 +335,17 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "Espace insuffisant sur l'iPhone",
             &[
-                "Libere au moins 500 Mo sur l'iPhone (Reglages > General > Stockage iPhone).",
+                "Libère au moins 500 Mo sur l'iPhone (Réglages > Général > Stockage iPhone).",
                 "Relance l'installation.",
             ],
         ));
     }
     if has("applicationverificationfailed") {
         return Some(Failure::new(
-            "L'iPhone a refuse la signature de l'app",
+            "L'iPhone a refusé la signature de l'app",
             &[
-                "Sur l'iPhone, supprime l'ancienne version de TwitNinf si elle est encore installee.",
-                "Reglages > General > VPN et gestion de l'appareil : supprime le profil de developpeur existant.",
+                "Sur l'iPhone, supprime l'ancienne version de TwitNinf si elle est encore installée.",
+                "Réglages > Général > VPN et gestion de l'appareil : supprime le profil de développeur existant.",
                 "Relance l'installation.",
             ],
         ));
@@ -295,11 +361,11 @@ fn classify(detail: &str) -> Option<Failure> {
         "device refused connection",
     ]) {
         return Some(Failure::new(
-            "La liaison avec l'iPhone a ete coupee",
+            "La liaison avec l'iPhone a été coupée",
             &[
-                "Ne debranche pas l'iPhone pendant l'installation.",
-                "Utilise un cable de donnees (certains cables ne font que charger) et un port USB directement sur le PC, sans hub.",
-                "Deverrouille l'iPhone, garde l'ecran allume, puis relance.",
+                "Ne débranche pas l'iPhone pendant l'installation.",
+                "Utilise un câble de données (certains câbles ne font que charger) et un port USB directement sur le PC, sans hub.",
+                "Déverrouille l'iPhone, garde l'écran allumé, puis relance.",
             ],
         ));
     }
@@ -307,9 +373,9 @@ fn classify(detail: &str) -> Option<Failure> {
     // --- Compte Apple -----------------------------------------------------
     if any(&["-21669", "incorrect verification code"]) {
         return Some(Failure::new(
-            "Code de verification incorrect",
+            "Code de vérification incorrect",
             &[
-                "Verifie les 6 chiffres recus sur ton iPhone ou par SMS.",
+                "Vérifie les 6 chiffres reçus sur ton iPhone ou par SMS.",
                 "Demande un nouveau code si l'ancien a plus de quelques minutes.",
             ],
         ));
@@ -323,8 +389,8 @@ fn classify(detail: &str) -> Option<Failure> {
             Failure::new(
                 "Identifiant ou mot de passe Apple incorrect",
                 &[
-                    "Verifie l'adresse du compte Apple et le mot de passe.",
-                    "Attention a la disposition du clavier et aux majuscules.",
+                    "Vérifie l'adresse du compte Apple et le mot de passe.",
+                    "Attention à la disposition du clavier et aux majuscules.",
                 ],
             )
             .retryable(),
@@ -332,10 +398,10 @@ fn classify(detail: &str) -> Option<Failure> {
     }
     if any(&["-36607", "account has been disabled", "account is locked"]) {
         return Some(Failure::new(
-            "Le compte Apple est bloque",
+            "Le compte Apple est bloqué",
             &[
-                "Va sur iforgot.apple.com pour debloquer le compte.",
-                "Reessaie ensuite depuis l'app.",
+                "Va sur iforgot.apple.com pour débloquer le compte.",
+                "Réessaie ensuite depuis l'app.",
             ],
         ));
     }
@@ -343,29 +409,29 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "Ce compte exige un mot de passe pour application",
             &[
-                "Cree un mot de passe pour application sur account.apple.com > Connexion et securite.",
-                "Utilise ce mot de passe a la place du mot de passe habituel.",
+                "Crée un mot de passe pour application sur account.apple.com > Connexion et sécurité.",
+                "Utilise ce mot de passe à la place du mot de passe habituel.",
             ],
         ));
     }
     if any(&["-22421", "session has expired", "session expired"]) {
         return Some(Failure::new(
-            "La session Apple a expire",
+            "La session Apple a expiré",
             &["Relance simplement l'installation : une nouvelle session sera ouverte."],
         ));
     }
     if any(&["anisette", "not provisioned"]) {
         return Some(Failure::new(
-            "Le service d'authentification Apple ne repond pas",
+            "Le service d'authentification Apple ne répond pas",
             &[
-                "C'est un service externe, momentanement indisponible.",
-                "Verifie ta connexion Internet, puis reessaie dans quelques minutes.",
+                "C'est un service externe, momentanément indisponible.",
+                "Vérifie ta connexion Internet, puis réessaie dans quelques minutes.",
             ],
         ));
     }
     if any(&["no developer teams", "no teams"]) {
         return Some(Failure::new(
-            "Ce compte Apple n'a pas d'equipe de developpement",
+            "Ce compte Apple n'a pas d'équipe de développement",
             &[
                 "Connecte-toi une fois sur developer.apple.com avec ce compte et accepte les conditions.",
                 "Relance ensuite l'installation.",
@@ -376,8 +442,8 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "Trop de certificats sur ce compte Apple",
             &[
-                "Relance l'installation : l'app proposera d'en revoquer un.",
-                "Revoquer un certificat casse les apps signees avec, sur les autres PC.",
+                "Relance l'installation : l'app proposera d'en révoquer un.",
+                "Révoquer un certificat casse les apps signées avec, sur les autres PC.",
             ],
         ));
     }
@@ -385,8 +451,8 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "Limite d'identifiants d'app atteinte chez Apple",
             &[
-                "Apple limite un compte gratuit a 10 identifiants d'app par periode de 7 jours.",
-                "Il faut attendre que la periode glissante se libere, ou utiliser un autre compte Apple.",
+                "Apple limite un compte gratuit à 10 identifiants d'app par période de 7 jours.",
+                "Il faut attendre que la période glissante se libère, ou utiliser un autre compte Apple.",
             ],
         ));
     }
@@ -403,8 +469,8 @@ fn classify(detail: &str) -> Option<Failure> {
         return Some(Failure::new(
             "Pas de connexion Internet utilisable",
             &[
-                "Verifie que le PC est bien connecte a Internet.",
-                "Si tu es derriere un VPN ou un pare-feu d'entreprise, desactive-le le temps de l'installation.",
+                "Vérifie que le PC est bien connecté à Internet.",
+                "Si tu es derrière un VPN ou un pare-feu d'entreprise, désactive-le le temps de l'installation.",
                 "Relance ensuite.",
             ],
         ));
@@ -418,6 +484,12 @@ fn classify(detail: &str) -> Option<Failure> {
 #[derive(Default)]
 struct PendingInputs {
     running: AtomicBool,
+    /// La question « fermer quand meme ? » a deja ete posee et attend une
+    /// reponse. Si l'utilisateur reclique sur la croix sans que rien ne se
+    /// passe, c'est que l'interface ne repond plus : la deuxieme demande
+    /// ferme pour de bon, plutot que de laisser une fenetre qu'on ne peut
+    /// plus fermer autrement que par le gestionnaire des taches.
+    quit_asked: AtomicBool,
     cancel_tx: Mutex<Option<oneshot::Sender<()>>>,
     confirm_tx: Mutex<Option<oneshot::Sender<bool>>>,
     device_tx: Mutex<Option<oneshot::Sender<String>>>,
@@ -467,13 +539,13 @@ fn save_account(keyring: &KeyringStorage, apple_id: &str, password: &str) {
     // si le Gestionnaire d'identification refuse (strategie d'entreprise,
     // profil restreint), l'installation vient de reussir et n'a aucune
     // raison d'etre declaree en echec pour autant.
-    if let Ok(json) = serde_json::to_string(&accounts) {
-        if let Err(e) = keyring.store("account_list", &json) {
-            tracing::warn!("liste des comptes non enregistree: {e}");
-        }
+    if let Ok(json) = serde_json::to_string(&accounts)
+        && let Err(e) = keyring.store("account_list", &json)
+    {
+        tracing::warn!("liste des comptes non enregistrée: {e}");
     }
     if let Err(e) = keyring.store(&format!("password/{apple_id}"), password) {
-        tracing::warn!("mot de passe non enregistre: {e}");
+        tracing::warn!("mot de passe non enregistré: {e}");
     }
 }
 
@@ -521,6 +593,27 @@ fn submit_cancel(state: State<PendingInputs>) {
     lock(&state.credentials_tx).take();
     lock(&state.twofa_tx).take();
     lock(&state.certs_tx).take();
+}
+
+/// Fermeture de la fenetre demandee pendant une injection, puis confirmee
+/// par l'utilisateur. On coupe le flux avant de quitter pour ne pas
+/// laisser un `winget`/`powershell` enfant tourner derriere.
+#[tauri::command]
+fn force_quit(app: AppHandle) {
+    let state = app.state::<PendingInputs>();
+    if let Some(tx) = lock(&state.cancel_tx).take() {
+        let _ = tx.send(());
+    }
+    state.running.store(false, Ordering::SeqCst);
+    app.exit(0);
+}
+
+/// L'utilisateur prefere laisser l'injection aller au bout. La fenetre
+/// reste ouverte et redeviendra protegee a la prochaine demande de
+/// fermeture.
+#[tauri::command]
+fn cancel_quit(state: State<PendingInputs>) {
+    state.quit_asked.store(false, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -595,11 +688,13 @@ fn submit_cert_choice(state: State<PendingInputs>, serials: Vec<String>) {
 fn open_log() -> Result<(), String> {
     let path = log_path();
     if !path.exists() {
-        return Err("Aucun journal n'a encore ete ecrit.".to_string());
+        return Err("Aucun journal n'a encore été écrit.".to_string());
     }
-    std::process::Command::new("explorer")
-        .arg("/select,")
-        .arg(&path)
+    // L'argument doit etre un seul et meme jeton « /select,<chemin> » :
+    // passe en deux arguments distincts, l'explorateur ne reconnait pas la
+    // demande et ouvre le dossier Documents a la place du journal.
+    std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("ouverture du journal impossible : {e}"))
@@ -610,15 +705,54 @@ fn log_file_path() -> String {
     log_path().display().to_string()
 }
 
+/// Appelee par l'interface une fois qu'elle est entierement construite.
+/// C'est la seule trace qui distingue « l'app s'est ouverte sur une
+/// fenetre blanche » de « l'app fonctionne » quand un testeur envoie son
+/// journal : sans elle, les deux cas produisent exactement le meme
+/// fichier.
+#[tauri::command]
+fn ui_ready() {
+    tracing::info!("interface chargee");
+}
+
+/// Remet l'app en etat « au repos » quoi qu'il arrive au flux : fin
+/// normale, erreur, annulation — et meme panique ou abandon de la tache.
+/// Sans ce garde-fou, un seul imprevu laissait `running` a `true` pour de
+/// bon : le bouton « Lancer » repondait alors « une installation est deja
+/// en cours » jusqu'au redemarrage de l'app.
+struct RunGuard(AppHandle);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let state = self.0.state::<PendingInputs>();
+        lock(&state.cancel_tx).take();
+        // Les canaux de question survivent a un flux interrompu par une
+        // erreur (le flux meurt sans les vider). Les remettre a zero ici
+        // evite qu'une reponse tardive de l'UI soit consommee par
+        // l'installation suivante.
+        lock(&state.confirm_tx).take();
+        lock(&state.device_tx).take();
+        lock(&state.account_tx).take();
+        lock(&state.credentials_tx).take();
+        lock(&state.twofa_tx).take();
+        lock(&state.certs_tx).take();
+        state.running.store(false, Ordering::SeqCst);
+        // Sinon la prochaine injection heriterait d'un « on a deja demande »
+        // et la fenetre se fermerait sans prevenir en pleine operation.
+        state.quit_asked.store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 async fn start_update(app: AppHandle) -> Result<(), Failure> {
     let state = app.state::<PendingInputs>();
     if state.running.swap(true, Ordering::SeqCst) {
         return Err(Failure::new(
-            "Une installation est deja en cours",
+            "Une installation est déjà en cours",
             &["Attends la fin de l'installation en cours, ou annule-la avant d'en relancer une."],
         ));
     }
+    let _guard = RunGuard(app.clone());
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     *lock(&state.cancel_tx) = Some(cancel_tx);
 
@@ -629,24 +763,11 @@ async fn start_update(app: AppHandle) -> Result<(), Failure> {
     // viendra jamais.
     let result: Result<(), Failure> = tokio::select! {
         r = run_update(app.clone()) => r,
-        _ = cancel_rx => Err(Failure::cancelled("Installation annulee")),
+        _ = cancel_rx => Err(Failure::cancelled("Installation annulée")),
     };
 
-    let state = app.state::<PendingInputs>();
-    lock(&state.cancel_tx).take();
-    // Les canaux de question survivent a un flux interrompu par une erreur
-    // (le flux meurt sans les vider). Les remettre a zero ici evite qu'une
-    // reponse tardive de l'UI soit consommee par l'installation suivante.
-    lock(&state.confirm_tx).take();
-    lock(&state.device_tx).take();
-    lock(&state.account_tx).take();
-    lock(&state.credentials_tx).take();
-    lock(&state.twofa_tx).take();
-    lock(&state.certs_tx).take();
-    state.running.store(false, Ordering::SeqCst);
-
     if let Err(ref f) = result {
-        tracing::error!("echec: {} | {:?}", f.title, f.detail);
+        tracing::error!("échec: {} | {:?}", f.title, f.detail);
     }
     // Une seule voie de restitution de l'erreur : la valeur renvoyee ici,
     // que le frontend recupere via le .catch() de son invoke(). Emettre en
@@ -696,8 +817,8 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
         .user_agent("KospInjection/1.0")
         .build()
         .explain(
-            "Impossible d'initialiser la connexion reseau",
-            &["Redemarre l'application. Si ca persiste, redemarre le PC."],
+            "Impossible d'initialiser la connexion réseau",
+            &["Redémarre l'application. Si ça persiste, redémarre le PC."],
         )?;
 
     // L'ordre compte : tout ce qui est verifiable sans reseau et sans
@@ -714,7 +835,7 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
     let device = probe_device(&app, &provider).await?;
     status(
         &app,
-        format!("{} detecte (iOS {})", device.name, device.ios_version),
+        format!("{} détecté (iOS {})", device.name, device.ios_version),
     );
     app.emit(
         "device",
@@ -726,34 +847,34 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
     .ok();
 
     stage(&app, "version");
-    status(&app, "Recherche de la derniere version...");
+    status(&app, "Recherche de la dernière version...");
     let source: AltStoreSource = http
         .get(SOURCE_URL)
         .send()
         .await
         .explain(
-            "Impossible de joindre le serveur de mise a jour",
+            "Impossible de joindre le serveur de mise à jour",
             &[
-                "Verifie que le PC est connecte a Internet.",
-                "Desactive VPN et pare-feu d'entreprise le temps de l'installation.",
+                "Vérifie que le PC est connecté à Internet.",
+                "Désactive VPN et pare-feu d'entreprise le temps de l'installation.",
                 "Relance ensuite.",
             ],
         )?
         .error_for_status()
         .explain(
-            "Le serveur de mise a jour a refuse la demande",
-            &["Reessaie dans quelques minutes. Si ca persiste, previens le developpeur."],
+            "Le serveur de mise à jour a refusé la demande",
+            &["Réessaie dans quelques minutes. Si ça persiste, préviens le développeur."],
         )?
         .json()
         .await
         .explain(
             "La liste des versions est illisible",
-            &["Le fichier de versions publie est invalide. Previens le developpeur."],
+            &["Le fichier de versions publié est invalide. Préviens le développeur."],
         )?;
 
     let app_entry = source.apps.first().or_fail(
-        "Aucune app publiee",
-        &["La liste des versions ne declare aucune app. Previens le developpeur."],
+        "Aucune app publiée",
+        &["La liste des versions ne déclare aucune app. Préviens le développeur."],
     )?;
     // « Derniere version » = le plus grand buildVersion numerique, pas le
     // premier element de la liste — apps.json n'est pas garanti trie.
@@ -762,8 +883,8 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
         .iter()
         .max_by_key(|v| v.build_version.parse::<u64>().unwrap_or(0))
         .or_fail(
-            "Aucune version publiee",
-            &["L'app publiee ne declare aucune version. Previens le developpeur."],
+            "Aucune version publiée",
+            &["L'app publiée ne déclare aucune version. Préviens le développeur."],
         )?;
 
     stage(&app, "download");
@@ -773,12 +894,12 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
     let keyring = KeyringStorage::new(KEYRING_SERVICE.to_string());
     let (mut account, apple_id, password) = login_flow(&app, &keyring).await?;
 
-    status(&app, "Ouverture de la session developpeur Apple...");
+    status(&app, "Ouverture de la session développeur Apple...");
     progress(&app, None);
     let mut dev_session = DeveloperSession::from_account(&mut account)
         .await
         .explain(
-            "Impossible d'ouvrir la session developpeur Apple",
+            "Impossible d'ouvrir la session développeur Apple",
             &[
                 "Connecte-toi une fois sur developer.apple.com avec ce compte et accepte les conditions.",
                 "Relance ensuite l'installation.",
@@ -791,14 +912,14 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
     save_account(&keyring, &apple_id, &password);
 
     let teams = dev_session.list_teams().await.explain(
-        "Impossible de lire les equipes du compte Apple",
+        "Impossible de lire les équipes du compte Apple",
         &[
-            "Verifie ta connexion Internet.",
+            "Vérifie ta connexion Internet.",
             "Connecte-toi une fois sur developer.apple.com avec ce compte et accepte les conditions.",
         ],
     )?;
     let team = teams.into_iter().next().or_fail(
-        "Ce compte Apple n'a pas d'equipe de developpement",
+        "Ce compte Apple n'a pas d'équipe de développement",
         &[
             "Connecte-toi une fois sur developer.apple.com avec ce compte et accepte les conditions.",
             "Relance ensuite l'installation.",
@@ -817,8 +938,8 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
         .explain(
             "Impossible d'enregistrer l'iPhone sur le compte Apple",
             &[
-                "Un compte Apple gratuit est limite a 100 appareils enregistres par an.",
-                "Verifie la connexion Internet, puis relance.",
+                "Un compte Apple gratuit est limité à 100 appareils enregistrés par an.",
+                "Vérifie la connexion Internet, puis relance.",
             ],
         )?;
 
@@ -880,16 +1001,23 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
         }
     };
 
-    let (signed_path, _special) = sideloader
-        .sign_app(ipa_path, Some(sideloader_team), true, Some(sign_cb))
-        .await
-        .explain(
-            "La signature de l'app a echoue",
-            &[
-                "Verifie ta connexion Internet (la signature dialogue avec Apple).",
-                "Si le probleme persiste, essaie avec un autre compte Apple gratuit.",
-            ],
-        )?;
+    let sign_result = sideloader
+        .sign_app(ipa_path.clone(), Some(sideloader_team), true, Some(sign_cb))
+        .await;
+
+    // L'IPA telecharge pese plusieurs dizaines de Mo et n'a plus aucune
+    // utilite une fois la signature passee : on le retire dans tous les
+    // cas, echec compris, sinon chaque tentative laisse sa copie derriere
+    // elle dans le dossier temporaire.
+    let _ = std::fs::remove_file(&ipa_path);
+
+    let (signed_path, _special) = sign_result.explain(
+        "La signature de l'app a échoué",
+        &[
+            "Vérifie ta connexion Internet (la signature dialogue avec Apple).",
+            "Si le problème persiste, essaie avec un autre compte Apple gratuit.",
+        ],
+    )?;
 
     // Le transfert dure souvent plus longtemps que la signature. La
     // bibliotheque expose sa progression uniquement si on appelle
@@ -920,34 +1048,34 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
     let _ = std::fs::remove_dir_all(&signed_path);
 
     install_result.explain(
-        "L'installation sur l'iPhone a echoue",
+        "L'installation sur l'iPhone a échoué",
         &[
-            "Garde l'iPhone deverrouille, branche en USB, ecran allume.",
-            "Verifie qu'il reste au moins 500 Mo de libre sur l'iPhone.",
+            "Garde l'iPhone déverrouillé, branché en USB, écran allumé.",
+            "Vérifie qu'il reste au moins 500 Mo de libre sur l'iPhone.",
             "Supprime l'ancienne version de TwitNinf sur l'iPhone, puis relance.",
         ],
     )?;
 
     progress(&app, Some(1.0));
     let mut next_steps = vec![
-        "Sur l'iPhone : Reglages > General > VPN et gestion de l'appareil.".to_string(),
+        "Sur l'iPhone : Réglages > Général > VPN et gestion de l'appareil.".to_string(),
         format!("Ouvre le profil au nom de {apple_id}, puis touche « Faire confiance »."),
-        "TwitNinf peut alors etre ouvert depuis l'ecran d'accueil.".to_string(),
+        "TwitNinf peut alors être ouvert depuis l'écran d'accueil.".to_string(),
     ];
     if device.ios_major >= 16 {
         next_steps.push(
-            "Si l'app refuse de s'ouvrir : Reglages > Confidentialite et securite > Mode developpeur, active-le et redemarre l'iPhone."
+            "Si l'app refuse de s'ouvrir : Réglages > Confidentialité et sécurité > Mode développeur, active-le et redémarre l'iPhone."
                 .to_string(),
         );
     }
     next_steps.push(
-        "Avec un compte Apple gratuit, l'app doit etre reinstallee tous les 7 jours.".to_string(),
+        "Avec un compte Apple gratuit, l'app doit être réinstallée tous les 7 jours.".to_string(),
     );
 
     app.emit(
         "done",
         serde_json::json!({
-            "title": format!("TwitNinf {} installe sur {}", latest.version, device.name),
+            "title": format!("TwitNinf {} installé sur {}", latest.version, device.name),
             "steps": next_steps,
         }),
     )
@@ -960,32 +1088,32 @@ async fn run_update(app: AppHandle) -> Result<(), Failure> {
 /// uniquement par le Wi-Fi, plusieurs appareils a la fois.
 async fn find_device(app: &AppHandle) -> Result<UsbmuxdProvider, Failure> {
     let mut usbmuxd = UsbmuxdConnection::default().await.explain(
-        "Le service Apple ne repond plus",
+        "Le service Apple ne répond plus",
         &[
-            "Redemarre le PC, puis relance l'application.",
-            "Si le probleme persiste, reinstalle « Apple Devices » depuis le Microsoft Store.",
+            "Redémarre le PC, puis relance l'application.",
+            "Si le problème persiste, réinstalle « Apple Devices » depuis le Microsoft Store.",
         ],
     )?;
     let devices = usbmuxd.get_devices().await.explain(
         "Impossible de lister les appareils Apple",
         &[
-            "Debranche puis rebranche l'iPhone.",
-            "Redemarre le PC si le probleme persiste.",
+            "Débranche puis rebranche l'iPhone.",
+            "Redémarre le PC si le problème persiste.",
         ],
     )?;
 
     let no_device_steps = [
-        "Branche l'iPhone au PC avec un cable USB.",
-        "Utilise un cable de donnees : beaucoup de cables ne servent qu'a charger.",
+        "Branche l'iPhone au PC avec un câble USB.",
+        "Utilise un câble de données : beaucoup de câbles ne servent qu'à charger.",
         "Branche-le sur un port USB du PC directement, sans hub ni station d'accueil.",
-        "Deverrouille l'iPhone et laisse l'ecran allume.",
-        "Quand l'iPhone demande « Se fier a cet ordinateur ? », touche « Se fier » et saisis ton code.",
-        "Si rien ne se passe : debranche, rebranche, attends 5 secondes, puis relance.",
+        "Déverrouille l'iPhone et laisse l'écran allumé.",
+        "Quand l'iPhone demande « Se fier à cet ordinateur ? », touche « Se fier » et saisis ton code.",
+        "Si rien ne se passe : débranche, rebranche, attends 5 secondes, puis relance.",
     ];
 
     if devices.is_empty() {
         return Err(Failure::new(
-            "Aucun iPhone n'est branche en USB",
+            "Aucun iPhone n'est branché en USB",
             &no_device_steps,
         ));
     }
@@ -1002,8 +1130,8 @@ async fn find_device(app: &AppHandle) -> Result<UsbmuxdProvider, Failure> {
             "L'iPhone est vu en Wi-Fi, pas en USB",
             &[
                 "L'installation exige une liaison USB : le Wi-Fi ne suffit pas.",
-                "Branche l'iPhone avec un cable de donnees, directement sur le PC.",
-                "Deverrouille l'iPhone, puis relance l'installation.",
+                "Branche l'iPhone avec un câble de données, directement sur le PC.",
+                "Déverrouille l'iPhone, puis relance l'installation.",
             ],
         ));
     }
@@ -1017,7 +1145,16 @@ async fn find_device(app: &AppHandle) -> Result<UsbmuxdProvider, Failure> {
         let options: Vec<DeviceOption> = usb
             .iter()
             .map(|d| DeviceOption {
-                name: format!("Appareil ...{}", &d.udid[d.udid.len().saturating_sub(8)..]),
+                // Par caracteres, pas par octets : un decoupage d'octets au
+                // milieu d'un caractere multi-octets paniquerait, et une
+                // panique ici emporte toute l'application.
+                name: format!(
+                    "Appareil ...{}",
+                    d.udid
+                        .chars()
+                        .skip(d.udid.chars().count().saturating_sub(8))
+                        .collect::<String>()
+                ),
                 udid: d.udid.clone(),
                 usb: true,
             })
@@ -1026,14 +1163,14 @@ async fn find_device(app: &AppHandle) -> Result<UsbmuxdProvider, Failure> {
         *lock(&app.state::<PendingInputs>().device_tx) = Some(tx);
         app.emit("need-device", &options).ok();
         rx.await
-            .map_err(|_| Failure::cancelled("Choix de l'appareil annule"))?
+            .map_err(|_| Failure::cancelled("Choix de l'appareil annulé"))?
     };
 
     let device = devices
         .iter()
         .find(|d| d.udid == chosen_udid)
         .or_fail(
-            "L'iPhone choisi n'est plus branche",
+            "L'iPhone choisi n'est plus branché",
             &["Rebranche l'iPhone et relance l'installation."],
         )?;
 
@@ -1052,15 +1189,15 @@ async fn probe_device(
     app: &AppHandle,
     provider: &UsbmuxdProvider,
 ) -> Result<DeviceDetails, Failure> {
-    status(app, "Verification de l'iPhone...");
+    status(app, "Vérification de l'iPhone...");
 
     let timeout_failure = || {
         Failure::new(
-            "L'iPhone ne repond pas",
+            "L'iPhone ne répond pas",
             &[
-                "Deverrouille l'iPhone et laisse l'ecran allume.",
-                "Regarde s'il affiche « Se fier a cet ordinateur ? » et touche « Se fier ».",
-                "Debranche, rebranche, puis relance l'installation.",
+                "Déverrouille l'iPhone et laisse l'écran allumé.",
+                "Regarde s'il affiche « Se fier à cet ordinateur ? » et touche « Se fier ».",
+                "Débranche, rebranche, puis relance l'installation.",
             ],
         )
     };
@@ -1069,9 +1206,9 @@ async fn probe_device(
         let mut lockdown = LockdownClient::connect(provider).await.explain(
             "Impossible de dialoguer avec l'iPhone",
             &[
-                "Debranche puis rebranche l'iPhone.",
-                "Utilise un cable de donnees, branche directement sur le PC.",
-                "Deverrouille l'iPhone, puis relance.",
+                "Débranche puis rebranche l'iPhone.",
+                "Utilise un câble de données, branché directement sur le PC.",
+                "Déverrouille l'iPhone, puis relance.",
             ],
         )?;
 
@@ -1092,8 +1229,8 @@ async fn probe_device(
         let pairing = provider.get_pairing_file().await.explain(
             "L'iPhone n'autorise pas encore ce PC",
             &[
-                "Deverrouille l'iPhone et laisse-le branche en USB.",
-                "Debranche puis rebranche le cable : la question « Se fier a cet ordinateur ? » doit apparaitre.",
+                "Déverrouille l'iPhone et laisse-le branché en USB.",
+                "Débranche puis rebranche le câble : la question « Se fier à cet ordinateur ? » doit apparaître.",
                 "Touche « Se fier » et saisis le code de l'iPhone.",
                 "Relance ensuite l'installation.",
             ],
@@ -1102,8 +1239,8 @@ async fn probe_device(
         lockdown.start_session(&pairing).await.explain(
             "L'iPhone refuse la session",
             &[
-                "Deverrouille l'iPhone : une session ne peut pas s'ouvrir sur un ecran verrouille.",
-                "Debranche, rebranche, touche « Se fier » si la question apparait.",
+                "Déverrouille l'iPhone : une session ne peut pas s'ouvrir sur un écran verrouillé.",
+                "Débranche, rebranche, touche « Se fier » si la question apparaît.",
                 "Relance ensuite l'installation.",
             ],
         )?;
@@ -1121,9 +1258,9 @@ async fn probe_device(
             .ok()
             .and_then(|v| v.as_string().map(|s| s.to_string()))
             .or_fail(
-                "L'iPhone n'a pas renvoye son identifiant",
+                "L'iPhone n'a pas renvoyé son identifiant",
                 &[
-                    "Debranche puis rebranche l'iPhone, deverrouille-le, et relance.",
+                    "Débranche puis rebranche l'iPhone, déverrouille-le, et relance.",
                 ],
             )?;
 
@@ -1152,7 +1289,7 @@ async fn download_ipa(
     status(
         app,
         format!(
-            "Telechargement de la version {} (build {})...",
+            "Téléchargement de la version {} (build {})...",
             latest.version, latest.build_version
         ),
     );
@@ -1163,26 +1300,26 @@ async fn download_ipa(
         .send()
         .await
         .explain(
-            "Le telechargement de l'app n'a pas demarre",
+            "Le téléchargement de l'app n'a pas démarré",
             &[
-                "Verifie que le PC est connecte a Internet.",
-                "Desactive VPN et pare-feu d'entreprise le temps du telechargement.",
+                "Vérifie que le PC est connecté à Internet.",
+                "Désactive VPN et pare-feu d'entreprise le temps du téléchargement.",
                 "Relance ensuite.",
             ],
         )?
         .error_for_status()
         .explain(
             "Le fichier de l'app est introuvable sur le serveur",
-            &["La version publiee n'est pas telechargeable. Previens le developpeur."],
+            &["La version publiée n'est pas téléchargeable. Préviens le développeur."],
         )?;
 
     let total = response.content_length();
     let ipa_path = std::env::temp_dir().join("TwitNinf-latest.ipa");
     let mut file = std::fs::File::create(&ipa_path).explain(
-        "Impossible d'ecrire le fichier temporaire",
+        "Impossible d'écrire le fichier temporaire",
         &[
-            "Libere de l'espace sur le disque systeme (au moins 1 Go).",
-            "Verifie qu'un antivirus ne bloque pas le dossier temporaire.",
+            "Libère de l'espace sur le disque système (au moins 1 Go).",
+            "Vérifie qu'un antivirus ne bloque pas le dossier temporaire.",
         ],
     )?;
 
@@ -1190,18 +1327,18 @@ async fn download_ipa(
     let mut last_pct = u64::MAX;
     loop {
         let chunk = response.chunk().await.explain(
-            "Le telechargement a ete interrompu",
+            "Le téléchargement a été interrompu",
             &[
-                "La connexion s'est coupee en cours de route.",
-                "Verifie le reseau (Wi-Fi instable, VPN), puis relance.",
+                "La connexion s'est coupée en cours de route.",
+                "Vérifie le réseau (Wi-Fi instable, VPN), puis relance.",
             ],
         )?;
         let Some(chunk) = chunk else { break };
         file.write_all(&chunk).explain(
-            "Ecriture du telechargement impossible",
+            "Écriture du téléchargement impossible",
             &[
-                "Libere de l'espace sur le disque systeme (au moins 1 Go).",
-                "Verifie qu'un antivirus ne bloque pas le dossier temporaire.",
+                "Libère de l'espace sur le disque système (au moins 1 Go).",
+                "Vérifie qu'un antivirus ne bloque pas le dossier temporaire.",
             ],
         )?;
         downloaded += chunk.len() as u64;
@@ -1214,7 +1351,7 @@ async fn download_ipa(
                 app.emit(
                     "status",
                     format!(
-                        "Telechargement de la version {} — {:.1} / {:.1} Mo",
+                        "Téléchargement de la version {} — {:.1} / {:.1} Mo",
                         latest.version,
                         downloaded as f64 / 1_048_576.0,
                         total as f64 / 1_048_576.0
@@ -1230,24 +1367,24 @@ async fn download_ipa(
     // Un serveur qui coupe en plein transfert renvoie un fichier tronque,
     // et l'erreur n'apparaitrait qu'a la signature sous la forme d'un
     // « bundle invalide » qui n'aide personne.
-    if let Some(total) = total.filter(|t| *t > 0) {
-        if downloaded != total {
-            return Err(Failure::new(
-                "Le telechargement est incomplet",
-                &[
-                    "Le fichier recu est plus court que prevu : la connexion a lache.",
-                    "Verifie le reseau, puis relance l'installation.",
-                ],
-            )
-            .with_detail(format!("{downloaded} octets recus sur {total} attendus")));
-        }
+    if let Some(total) = total.filter(|t| *t > 0)
+        && downloaded != total
+    {
+        return Err(Failure::new(
+            "Le téléchargement est incomplet",
+            &[
+                "Le fichier reçu est plus court que prévu : la connexion a lâché.",
+                "Vérifie le réseau, puis relance l'installation.",
+            ],
+        )
+        .with_detail(format!("{downloaded} octets reçus sur {total} attendus")));
     }
     if downloaded < 4096 || !starts_with_zip_magic(&ipa_path) {
         return Err(Failure::new(
-            "Le fichier telecharge n'est pas une app valide",
+            "Le fichier téléchargé n'est pas une app valide",
             &[
-                "Le serveur a renvoye autre chose qu'un IPA (page d'erreur, portail Wi-Fi...).",
-                "Deconnecte-toi de tout portail captif, puis relance.",
+                "Le serveur a renvoyé autre chose qu'un IPA (page d'erreur, portail Wi-Fi...).",
+                "Déconnecte-toi de tout portail captif, puis relance.",
             ],
         ));
     }
@@ -1290,8 +1427,8 @@ async fn login_flow(
             return Err(Failure::new(
                 "Trop de tentatives de connexion",
                 &[
-                    "Apple bloque temporairement un compte apres plusieurs mots de passe errones.",
-                    "Verifie le mot de passe sur account.apple.com, puis relance l'application.",
+                    "Apple bloque temporairement un compte après plusieurs mots de passe erronés.",
+                    "Vérifie le mot de passe sur account.apple.com, puis relance l'application.",
                 ],
             ));
         }
@@ -1308,7 +1445,7 @@ async fn login_flow(
                     ask_credentials(
                         app,
                         Some(&id),
-                        Some("Le mot de passe enregistre pour ce compte est introuvable."),
+                        Some("Le mot de passe enregistré pour ce compte est introuvable."),
                     )
                     .await?
                 }
@@ -1346,7 +1483,7 @@ async fn choose_saved_account(
             *lock(&app.state::<PendingInputs>().account_tx) = Some(tx);
             app.emit("need-account", &accounts).ok();
             rx.await
-                .map_err(|_| Failure::cancelled("Choix du compte annule"))
+                .map_err(|_| Failure::cancelled("Choix du compte annulé"))
         }
     }
 }
@@ -1364,7 +1501,7 @@ async fn ask_credentials(
     )
     .ok();
     rx.await
-        .map_err(|_| Failure::cancelled("Saisie des identifiants annulee"))
+        .map_err(|_| Failure::cancelled("Saisie des identifiants annulée"))
 }
 
 async fn try_login(
@@ -1380,7 +1517,7 @@ async fn try_login(
             "Le service d'authentification Apple est injoignable",
             &[
                 "C'est un service externe, parfois indisponible quelques minutes.",
-                "Verifie ta connexion Internet, puis reessaie.",
+                "Vérifie ta connexion Internet, puis réessaie.",
             ],
         )?
         .set_serial_number("twitninf-updater".to_string())
@@ -1397,15 +1534,26 @@ async fn try_login(
         .explain(
             "Connexion au compte Apple impossible",
             &[
-                "Verifie l'adresse du compte Apple et le mot de passe.",
+                "Vérifie l'adresse du compte Apple et le mot de passe.",
                 "Assure-toi que la double authentification est active sur ce compte.",
-                "Verifie ta connexion Internet, puis reessaie.",
+                "Vérifie ta connexion Internet, puis réessaie.",
             ],
         )
-        // Un refus au moment de la connexion vaut presque toujours
-        // « identifiants a resaisir » : sans ca, un mot de passe memorise
-        // devenu obsolete condamnerait l'app a echouer indefiniment.
-        .map_err(|f| if f.cancelled { f } else { f.retryable() })
+        // Un refus non reconnu au moment de la connexion vaut presque
+        // toujours « identifiants a resaisir » : sans ca, un mot de passe
+        // memorise devenu obsolete condamnerait l'app a echouer
+        // indefiniment. En revanche, quand la cause est identifiee (pas de
+        // reseau, service Apple en panne, compte bloque), redemander le mot
+        // de passe est absurde : on faisait saisir trois fois le bon mot de
+        // passe pour finir sur « trop de tentatives » alors que le vrai
+        // probleme etait la connexion Internet.
+        .map_err(|f| {
+            if f.cancelled || f.classified {
+                f
+            } else {
+                f.retryable()
+            }
+        })
 }
 
 /// Demande le code 2FA a l'UI. `params.unknown` signale qu'Apple n'a pas
@@ -1426,7 +1574,7 @@ async fn wait_2fa(
             serde_json::json!({
                 "id": n.id,
                 "label": if n.number_with_dial_code.is_empty() {
-                    format!("Numero se terminant par {}", n.last_two_digits)
+                    format!("Numéro se terminant par {}", n.last_two_digits)
                 } else {
                     n.number_with_dial_code.clone()
                 },
@@ -1440,7 +1588,7 @@ async fn wait_2fa(
     let error = params.last_error.as_deref().map(|e| {
         classify(e)
             .map(|f| f.title)
-            .unwrap_or_else(|| "Le code precedent n'a pas ete accepte.".to_string())
+            .unwrap_or_else(|| "Le code précédent n'a pas été accepté.".to_string())
     });
 
     let (tx, rx) = oneshot::channel();
@@ -1455,19 +1603,51 @@ async fn wait_2fa(
         }),
     )
     .ok();
-    Ok(rx.await.context("saisie du code de verification annulee")?)
+    Ok(rx.await.context("saisie du code de vérification annulée")?)
 }
 
 // ---------------------------------------------------------------------------
 // Prerequis Windows
 // ---------------------------------------------------------------------------
 
+/// Noms sous lesquels le service Apple peut exister selon la facon dont
+/// il a ete installe : iTunes/AMDS classique, paquet « Apple Devices » du
+/// Microsoft Store, ou vieilles versions. Chercher un seul nom faisait
+/// conclure « pilotes absents » sur des PC ou ils etaient bel et bien la,
+/// et proposait une reinstallation de 150 Mo pour rien.
+const APPLE_SERVICE_NAMES: [&str; 3] = [
+    "Apple Mobile Device Service",
+    "AppleMobileDeviceService",
+    "Apple Mobile Device",
+];
+
+/// Interroge un service Windows. `None` = le service n'existe pas.
+fn query_service(name: &str) -> Option<String> {
+    let out = hidden("sc.exe").args(["query", name]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 /// Teste si un service Windows existe, quel que soit son etat.
 fn windows_service_exists(name: &str) -> bool {
-    std::process::Command::new("sc")
-        .args(["query", name])
-        .output()
-        .map(|out| out.status.success())
+    query_service(name).is_some()
+}
+
+fn find_apple_service() -> Option<&'static str> {
+    APPLE_SERVICE_NAMES
+        .iter()
+        .copied()
+        .find(|name| windows_service_exists(name))
+}
+
+/// Service present ET demarre. Sans cette distinction, l'app tentait de
+/// demarrer un service deja en marche — et surtout, elle demandait une
+/// elevation UAC pour rien quand le probleme venait d'ailleurs.
+fn service_running(name: &str) -> bool {
+    query_service(name)
+        .map(|out| out.contains("RUNNING"))
         .unwrap_or(false)
 }
 
@@ -1484,7 +1664,7 @@ fn windows_service_exists(name: &str) -> bool {
 /// l'installation — deux confirmations distinctes, aucune saisie de mot
 /// de passe systeme requise.
 async fn ensure_apple_drivers(app: &AppHandle) -> Result<(), Failure> {
-    status(app, "Verification des composants Apple...");
+    status(app, "Vérification des composants Apple...");
     if UsbmuxdConnection::default().await.is_ok() {
         return Ok(());
     }
@@ -1493,29 +1673,49 @@ async fn ensure_apple_drivers(app: &AppHandle) -> Result<(), Failure> {
     // pilotes presents mais service arrete (il faut le demarrer). Proposer
     // une installation de 150 Mo a quelqu'un dont le service est
     // simplement arrete envoie sur une fausse piste.
-    const SERVICE: &str = "Apple Mobile Device Service";
-    if windows_service_exists(SERVICE) {
-        status(app, "Demarrage du service Apple...");
-        let started = tokio::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!("Start-Service -Name '{SERVICE}'"),
-            ])
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
+    if let Some(service) = find_apple_service() {
+        if !service_running(service) {
+            status(app, "Démarrage du service Apple...");
+            // Sans droits d'administrateur, Start-Service echoue sur un
+            // refus d'acces. On retente alors en demandant l'elevation a
+            // Windows : c'est exactement ce que l'utilisateur ferait a la
+            // main dans la console « Services », qui exige les memes
+            // droits.
+            let start = format!("Start-Service -Name '{}'", service.replace('\'', "''"));
+            let started = powershell(&start)
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
 
-        if started && UsbmuxdConnection::default().await.is_ok() {
+            if !started {
+                status(
+                    app,
+                    "Démarrage du service Apple (accepte l'invite Windows si elle apparaît)...",
+                );
+                // Tout en apostrophes simples, doublees a l'interieur :
+                // passer par des guillemets doubles ici, c'est trois
+                // couches d'echappement (Rust, ligne de commande Windows,
+                // PowerShell) dont la moindre erreur casse la commande sans
+                // rien dire.
+                let elevated = format!(
+                    "Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Wait \
+                     -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'",
+                    start.replace('\'', "''")
+                );
+                powershell(&elevated).status().await.ok();
+            }
+        }
+
+        if UsbmuxdConnection::default().await.is_ok() {
             return Ok(());
         }
         return Err(Failure::new(
-            "Le service Apple est installe mais arrete",
+            "Le service Apple ne répond pas",
             &[
-                "Ouvre « Services » depuis le menu Demarrer.",
-                "Trouve « Apple Mobile Device Service », clic droit > Demarrer.",
-                "Si le demarrage echoue, redemarre le PC et relance l'application.",
+                "Ouvre « Services » depuis le menu Démarrer et vérifie que « Apple Mobile Device Service » est bien démarré.",
+                "Redémarre le PC : le service ne reprend la main sur l'iPhone qu'après un redémarrage.",
+                "Si le problème persiste, réinstalle « Apple Devices » depuis le Microsoft Store, puis redémarre.",
             ],
         ));
     }
@@ -1525,19 +1725,19 @@ async fn ensure_apple_drivers(app: &AppHandle) -> Result<(), Failure> {
     app.emit(
         "need-prereqs",
         serde_json::json!({
-            "message": "Les pilotes Apple (Apple Mobile Device Service) ne sont pas installes sur ce PC.",
-            "detail": "Sans eux, Windows ne peut pas parler a l'iPhone. Installer « Apple Mobile Device Support » via WinGet (~150 Mo, telecharge depuis apple.com) ?",
+            "message": "Les pilotes Apple (Apple Mobile Device Service) ne sont pas installés sur ce PC.",
+            "detail": "Sans eux, Windows ne peut pas parler à l'iPhone. Installer « Apple Mobile Device Support » via WinGet (~150 Mo, téléchargé depuis apple.com) ?",
         }),
     )
     .ok();
     let confirmed = rx
         .await
-        .map_err(|_| Failure::cancelled("Installation des pilotes annulee"))?;
+        .map_err(|_| Failure::cancelled("Installation des pilotes annulée"))?;
     if !confirmed {
         return Err(Failure::new(
             "Les pilotes Apple sont indispensables",
             &[
-                "Sans les pilotes Apple, Windows ne detecte pas l'iPhone.",
+                "Sans les pilotes Apple, Windows ne détecte pas l'iPhone.",
                 "Relance l'installation et accepte l'installation des pilotes,",
                 "ou installe « Apple Devices » depuis le Microsoft Store puis relance.",
             ],
@@ -1548,13 +1748,14 @@ async fn ensure_apple_drivers(app: &AppHandle) -> Result<(), Failure> {
 
     status(
         app,
-        "Installation d'Apple Mobile Device Support (autorise l'invite Windows si elle apparait)...",
+        "Installation d'Apple Mobile Device Support (autorise l'invite Windows si elle apparaît)...",
     );
-    let status_code = tokio::process::Command::new("winget")
+    let status_code = hidden_async("winget.exe")
         .args([
             "install",
             "--id",
             "Apple.AppleMobileDeviceSupport",
+            "--exact",
             // --source winget : sans ca, winget interroge aussi la source
             // msstore, qui exige d'accepter ses propres conditions
             // d'utilisation au premier lancement — un prompt interactif
@@ -1570,28 +1771,28 @@ async fn ensure_apple_drivers(app: &AppHandle) -> Result<(), Failure> {
         .status()
         .await
         .explain(
-            "WinGet n'a pas pu etre lance",
+            "WinGet n'a pas pu être lancé",
             &[
                 "Installe « Apple Devices » depuis le Microsoft Store.",
-                "Redemarre ensuite le PC et relance l'application.",
+                "Redémarre ensuite le PC et relance l'application.",
             ],
         )?;
     if !status_code.success() {
         return Err(Failure::new(
-            "L'installation des pilotes Apple a echoue",
+            "L'installation des pilotes Apple a échoué",
             &[
-                "Une invite Windows a peut-etre ete refusee : relance et accepte-la.",
+                "Une invite Windows a peut-être été refusée : relance et accepte-la.",
                 "Sinon, installe « Apple Devices » depuis le Microsoft Store.",
-                "Redemarre le PC apres l'installation, puis relance l'application.",
+                "Redémarre le PC après l'installation, puis relance l'application.",
             ],
         ));
     }
 
-    status(app, "Verification des pilotes Apple...");
+    status(app, "Vérification des pilotes Apple...");
     UsbmuxdConnection::default().await.explain(
-        "Les pilotes Apple ne repondent toujours pas",
+        "Les pilotes Apple ne répondent toujours pas",
         &[
-            "Redemarre le PC : les pilotes ne sont actifs qu'apres un redemarrage.",
+            "Redémarre le PC : les pilotes ne sont actifs qu'après un redémarrage.",
             "Relance ensuite l'application.",
         ],
     )?;
@@ -1611,7 +1812,7 @@ async fn ensure_apple_drivers(app: &AppHandle) -> Result<(), Failure> {
 /// App Runtime a la version exacte qu'elle requiert — memes releases,
 /// garanties compatibles entre elles, pas de devinette de version.
 async fn ensure_winget(app: &AppHandle) -> Result<(), Failure> {
-    let present = tokio::process::Command::new("winget")
+    let present = hidden_async("winget.exe")
         .arg("--version")
         .status()
         .await
@@ -1621,50 +1822,62 @@ async fn ensure_winget(app: &AppHandle) -> Result<(), Failure> {
         return Ok(());
     }
 
-    status(app, "Installation de WinGet et de ses dependances...");
+    status(app, "Installation de WinGet et de ses dépendances...");
     let work_dir = std::env::temp_dir().join("kosp-winget-deps");
     let script = format!(
         r#"
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$work = '{work}'
+$work = {work}
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
-$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest'
-$depsAsset = $release.assets | Where-Object {{ $_.name -eq 'DesktopAppInstaller_Dependencies.zip' }}
-$bundleAsset = $release.assets | Where-Object {{ $_.name -like '*.msixbundle' }}
+$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -Headers @{{ 'User-Agent' = 'KospInjection' }}
+$depsAsset = $release.assets | Where-Object {{ $_.name -eq 'DesktopAppInstaller_Dependencies.zip' }} | Select-Object -First 1
+$bundleAsset = $release.assets | Where-Object {{ $_.name -like '*.msixbundle' }} | Select-Object -First 1
+if (-not $depsAsset -or -not $bundleAsset) {{ throw 'release winget-cli incomplete' }}
 
 $depsZip = Join-Path $work 'deps.zip'
-Invoke-WebRequest -Uri $depsAsset.browser_download_url -OutFile $depsZip
+Invoke-WebRequest -Uri $depsAsset.browser_download_url -OutFile $depsZip -UseBasicParsing
 Expand-Archive -Path $depsZip -DestinationPath $work -Force
 
-Get-ChildItem -Path (Join-Path $work 'x64') -Filter '*.appx' | ForEach-Object {{
-    Add-AppxPackage -Path $_.FullName -ErrorAction Stop
+# Une machine ARM64 (Surface, PC Snapdragon) refuse les paquets x64 :
+# le dossier a prendre depend de l'architecture reelle du systeme, pas de
+# celle de notre executable, qui tourne peut-etre en emulation.
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {{ 'arm64' }} else {{ 'x64' }}
+$depsDir = Join-Path $work $arch
+if (-not (Test-Path $depsDir)) {{ $depsDir = Join-Path $work 'x64' }}
+
+# Une dependance deja presente dans une version plus recente fait echouer
+# Add-AppxPackage : ce n'est pas une raison d'abandonner l'installation.
+Get-ChildItem -Path $depsDir -Filter '*.appx' -ErrorAction SilentlyContinue | ForEach-Object {{
+    try {{ Add-AppxPackage -Path $_.FullName -ErrorAction Stop }} catch {{ }}
 }}
 
 $bundlePath = Join-Path $work 'winget.msixbundle'
-Invoke-WebRequest -Uri $bundleAsset.browser_download_url -OutFile $bundlePath
+Invoke-WebRequest -Uri $bundleAsset.browser_download_url -OutFile $bundlePath -UseBasicParsing
 Add-AppxPackage -Path $bundlePath -ErrorAction Stop
 "#,
-        work = work_dir.display()
+        work = ps_quote(&work_dir)
     );
-    let status_code = tokio::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
+    let status_code = powershell(&script)
         .status()
         .await
         .explain(
-            "PowerShell n'a pas pu etre lance",
+            "PowerShell n'a pas pu être lancé",
             &[
                 "Installe « Apple Devices » depuis le Microsoft Store.",
-                "Redemarre le PC, puis relance l'application.",
+                "Redémarre le PC, puis relance l'application.",
             ],
         )?;
+    // Le dossier de travail contient l'archive des dependances et le
+    // bundle : une centaine de Mo qui n'ont plus aucune utilite une fois
+    // les paquets installes.
+    let _ = std::fs::remove_dir_all(&work_dir);
+
     if !status_code.success() {
         return Err(Failure::new(
-            "WinGet n'a pas pu etre installe sur ce PC",
+            "WinGet n'a pas pu être installé sur ce PC",
             &[
-                "Installe « Apple Devices » depuis le Microsoft Store : ca suffit a faire fonctionner l'app.",
-                "Redemarre le PC apres l'installation, puis relance l'application.",
+                "Installe « Apple Devices » depuis le Microsoft Store : ça suffit à faire fonctionner l'app.",
+                "Redémarre le PC après l'installation, puis relance l'application.",
             ],
         ));
     }
@@ -1682,15 +1895,37 @@ Add-AppxPackage -Path $bundlePath -ErrorAction Stop
 /// optionnel : sans lui, Tauri ne peut meme pas creer sa fenetre, donc
 /// impossible de demander confirmation via l'interface — on l'installe
 /// silencieusement avant de tenter de demarrer.
+///
+/// La cle a interroger n'est pas la meme selon le type d'installation, et
+/// s'en tenir a une seule etait le pire defaut du demarrage : une machine
+/// equipee d'un WebView2 « par utilisateur » (cas courant sous Windows 10,
+/// installe dans le dos de l'utilisateur par Edge ou Office) etait jugee
+/// depourvue a chaque lancement, et l'app repartait telecharger et
+/// reinstaller le runtime avant d'afficher sa fenetre. A chaque ouverture.
+/// - installation machine : HKLM\SOFTWARE\WOW6432Node\... (vue 32 bits)
+/// - installation utilisateur : HKCU\SOFTWARE\... (sans WOW6432Node)
 fn webview2_installed() -> bool {
-    const KEY_PATH: &str =
-        r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
-    ["HKLM", "HKCU"].iter().any(|root| {
-        std::process::Command::new("reg")
-            .args(["query", &format!("{root}\\{KEY_PATH}"), "/v", "pv"])
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+    const CLIENT: &str = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    let keys = [
+        format!(r"HKLM\SOFTWARE\WOW6432Node\{CLIENT}"),
+        format!(r"HKLM\SOFTWARE\{CLIENT}"),
+        format!(r"HKCU\SOFTWARE\{CLIENT}"),
+        format!(r"HKCU\SOFTWARE\WOW6432Node\{CLIENT}"),
+    ];
+    keys.iter().any(|key| {
+        let Ok(out) = hidden("reg.exe").args(["query", key, "/v", "pv"]).output() else {
+            return false;
+        };
+        if !out.status.success() {
+            return false;
+        }
+        // La cle survit a une desinstallation, avec pv remis a "0.0.0.0" :
+        // sa seule presence ne prouve donc pas que le runtime est la.
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines()
+            .filter(|line| line.contains("REG_SZ"))
+            .filter_map(|line| line.split_whitespace().last())
+            .any(|value| value != "0.0.0.0" && value.contains('.'))
     })
 }
 
@@ -1698,25 +1933,34 @@ fn ensure_webview2() {
     if webview2_installed() {
         return;
     }
+    tracing::warn!("WebView2 absent : installation du runtime avant démarrage");
     // Bootstrapper Evergreen officiel Microsoft (lien stable documente) :
-    // quelques Mo, installe la vraie runtime silencieusement.
+    // quelques Mo, qui telecharge et installe la vraie runtime. Volontaire-
+    // ment PAS en /silent : a ce stade l'app n'a pas encore de fenetre, un
+    // ecran vide pendant une minute passe pour un plantage — l'assistant
+    // Microsoft, lui, montre sa propre progression.
     let installer = std::env::temp_dir().join("MicrosoftEdgeWebview2Setup.exe");
-    let downloaded = std::process::Command::new("powershell")
+    let downloaded = hidden("powershell.exe")
         .args([
             "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
             "-Command",
             &format!(
-                "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'",
-                installer.display()
+                "{PS_PRELUDE}Invoke-WebRequest -UseBasicParsing \
+                 -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile {}",
+                ps_quote(&installer)
             ),
         ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if downloaded {
-        let _ = std::process::Command::new(&installer)
-            .args(["/silent", "/install"])
-            .status();
+        let _ = std::process::Command::new(&installer).arg("/install").status();
+        let _ = std::fs::remove_file(&installer);
+    } else {
+        tracing::warn!("téléchargement du bootstrapper WebView2 impossible");
     }
     // Si l'installation echoue malgre tout, Tauri affichera son propre
     // message d'erreur natif au moment de creer la fenetre — pas besoin
@@ -1734,7 +1978,13 @@ fn init_logging() {
     let path = log_path();
     // Repart d'un fichier vide a chaque lancement : le journal doit
     // decrire la session en cours, pas l'accumulation de toutes.
-    let _ = std::fs::write(&path, b"");
+    //
+    // La marque d'ordre des octets n'est pas decorative : le Bloc-notes
+    // des premieres versions de Windows 10 lit un fichier sans marque avec
+    // la page de codes du systeme, et affiche alors « installé » a la
+    // place des accents. Or le journal est justement ce que le testeur
+    // ouvre et recopie quand il signale un probleme.
+    let _ = std::fs::write(&path, b"\xEF\xBB\xBF");
     let writer = move || -> Box<dyn std::io::Write> {
         match std::fs::OpenOptions::new().append(true).open(&path) {
             Ok(f) => Box::new(f),
@@ -1749,9 +1999,123 @@ fn init_logging() {
         .try_init();
 }
 
+// ---------------------------------------------------------------------------
+// Garde-fous de demarrage
+// ---------------------------------------------------------------------------
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn MessageBoxW(
+        hwnd: *mut core::ffi::c_void,
+        text: *const u16,
+        caption: *const u16,
+        utype: u32,
+    ) -> i32;
+}
+
+/// Boite de dialogue native. Compile en sous-systeme « windows », l'app
+/// n'a aucune console : sans ca, tout ce qui casse avant la creation de la
+/// fenetre se solde par un programme qui se ferme sans un mot.
+fn message_box(title: &str, text: &str) {
+    use std::os::windows::ffi::OsStrExt as _;
+    fn wide(s: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+    const MB_ICONERROR: u32 = 0x0000_0010;
+    const MB_SETFOREGROUND: u32 = 0x0001_0000;
+    let (text, title) = (wide(text), wide(title));
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_ICONERROR | MB_SETFOREGROUND,
+        );
+    }
+}
+
+/// Verrou d'instance unique : un fichier ouvert en partage interdit. La
+/// deuxieme instance se heurte a un refus de partage et le sait, sans
+/// service ni bibliotheque supplementaire ; Windows libere le handle meme
+/// si la premiere instance a plante.
+///
+/// Deux instances, ce n'est pas theorique : elles se disputent le meme
+/// fichier d'IPA temporaire (telechargement corrompu) et le meme iPhone.
+///
+/// `Err(true)` = une autre instance tourne. `Err(false)` = verrou
+/// impossible a poser pour une autre raison ; dans le doute on laisse
+/// demarrer plutot que de bloquer l'utilisateur.
+fn single_instance() -> Result<std::fs::File, bool> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .share_mode(0)
+        .open(std::env::temp_dir().join("kosp-injection.lock"))
+    {
+        Ok(file) => Ok(file),
+        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => Err(true),
+        Err(e) => {
+            tracing::warn!("verrou d'instance unique impossible: {e}");
+            Err(false)
+        }
+    }
+}
+
+/// Ramene la fenetre dans l'ecran utile. La taille demandee (700 points de
+/// haut) depasse la hauteur disponible d'un portable 1080p affiche a 150 %
+/// — configuration on ne peut plus courante — et le pied de fenetre, donc
+/// le bouton « Lancer l'injection », se retrouvait sous la barre des
+/// taches, hors d'atteinte.
+fn fit_to_screen(window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    if scale <= 0.0 {
+        return;
+    }
+    let work = monitor.work_area();
+    let available_h = work.size.height as f64 / scale;
+    let available_w = work.size.width as f64 / scale;
+
+    let width = 460.0_f64.min(available_w - 16.0).max(360.0);
+    // La marge couvre la barre de titre et les bordures, qui ne sont pas
+    // comptees dans la taille interieure que l'on fixe ici.
+    let height = 700.0_f64.min(available_h - 56.0).max(420.0);
+
+    if height < 700.0 || width < 460.0 {
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+        let _ = window.center();
+    }
+}
+
 fn main() {
-    ensure_webview2();
+    // Le verrou d'abord : `init_logging` repart d'un journal vide, une
+    // deuxieme copie lancee par megarde effacerait donc le journal de
+    // l'injection en cours avant meme de se rendre compte qu'elle est de
+    // trop.
+    let _instance_lock = match single_instance() {
+        Ok(file) => Some(file),
+        Err(true) => {
+            message_box(
+                "Kosp Injection",
+                "Kosp Injection est déjà ouvert.\n\n\
+                 Utilise la fenêtre déjà affichée : deux copies lancées en même temps \
+                 se disputent l'iPhone et le fichier téléchargé.",
+            );
+            return;
+        }
+        Err(false) => None,
+    };
+
     init_logging();
+    ensure_webview2();
 
     // install_default() n'echoue que si un fournisseur est deja installe,
     // ce qui n'est pas un probleme : les bibliotheques en aval en
@@ -1759,11 +2123,34 @@ fn main() {
     // meme d'avoir une fenetre pour dire pourquoi.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     if let Err(e) = isideload::init() {
-        tracing::warn!("rapport d'erreurs non initialise: {e}");
+        tracing::warn!("rapport d'erreurs non initialisé: {e}");
     }
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .manage(PendingInputs::default())
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                fit_to_screen(&window);
+            }
+            Ok(())
+        })
+        // Fermer la fenetre en pleine injection coupe la signature ou le
+        // transfert net, et laisse une app a moitie installee sur
+        // l'iPhone. On demande confirmation plutot que d'obeir tout de
+        // suite ; l'UI affiche la question, le backend continue en
+        // attendant la reponse.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let state = app.state::<PendingInputs>();
+                if state.running.load(Ordering::SeqCst)
+                    && !state.quit_asked.swap(true, Ordering::SeqCst)
+                {
+                    api.prevent_close();
+                    app.emit("confirm-quit", ()).ok();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             start_update,
             submit_cancel,
@@ -1777,7 +2164,25 @@ fn main() {
             list_saved_accounts,
             open_log,
             log_file_path,
+            force_quit,
+            cancel_quit,
+            ui_ready,
         ])
-        .run(tauri::generate_context!())
-        .expect("erreur au lancement de l'application Tauri");
+        .run(tauri::generate_context!());
+
+    // Un `.expect()` ici, c'est une panique silencieuse : l'app disparait
+    // sans fenetre ni message, et le testeur n'a rien a raconter. Le cas
+    // le plus frequent est un WebView2 absent que l'installation
+    // automatique n'a pas reussi a poser.
+    if let Err(e) = result {
+        tracing::error!("lancement impossible: {e}");
+        message_box(
+            "Kosp Injection n'a pas pu démarrer",
+            &format!(
+                "L'interface n'a pas pu s'ouvrir.\n\n\
+                 Installe « Microsoft Edge WebView2 Runtime » depuis le site de Microsoft, \
+                 puis relance l'application.\n\nDétail technique :\n{e}"
+            ),
+        );
+    }
 }

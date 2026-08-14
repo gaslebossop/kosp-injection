@@ -5,15 +5,28 @@
 
 const tauri = window.__TAURI__;
 
+/** Ecran de secours : une fenetre qui reste vide ou inerte n'apprend rien
+ *  a personne. Construit sans innerHTML ni style en ligne, pour rester
+ *  affichable meme sous la politique de securite de contenu de l'app. */
+function fatal(reason) {
+  const box = document.createElement("div");
+  box.className = "fatal";
+  const h = document.createElement("h2");
+  h.textContent = "L'application n'a pas pu démarrer";
+  const p = document.createElement("p");
+  p.textContent = reason;
+  box.append(h, p);
+  document.body.replaceChildren(box);
+  throw new Error(reason);
+}
+
 // Sans le pont Tauri, aucun bouton ne repondrait et l'app aurait l'air
 // simplement figee. Mieux vaut le dire.
 if (!tauri || !tauri.core || !tauri.event) {
-  document.body.innerHTML =
-    '<div style="padding:40px;font-family:Segoe UI,sans-serif;color:#E9EBEE">' +
-    "<h2>L'application n'a pas pu demarrer</h2>" +
-    "<p>Le moteur d'affichage n'a pas charge le pont interne. Redemarre l'application ; " +
-    "si le probleme persiste, redemarre le PC.</p></div>";
-  throw new Error("pont Tauri indisponible");
+  fatal(
+    "Le moteur d'affichage n'a pas chargé le pont interne. Redémarre l'application ; " +
+      "si le problème persiste, redémarre le PC."
+  );
 }
 
 const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
@@ -24,9 +37,9 @@ const el = (id) => document.getElementById(id);
  *  avec les appels a `stage(...)` du backend Rust. */
 const STAGES = [
   { id: "drivers", name: "Composants Apple" },
-  { id: "device", name: "Detection de l'iPhone" },
-  { id: "version", name: "Derniere version publiee" },
-  { id: "download", name: "Telechargement de l'app" },
+  { id: "device", name: "Détection de l'iPhone" },
+  { id: "version", name: "Dernière version publiée" },
+  { id: "download", name: "Téléchargement de l'app" },
   { id: "account", name: "Compte Apple & certificat" },
   { id: "sign", name: "Signature de l'app" },
   { id: "install", name: "Injection sur l'iPhone" },
@@ -91,7 +104,21 @@ const els = {
   certList: el("cert-list"),
   btnSubmitCerts: el("btn-submit-certs"),
   btnCancelCerts: el("btn-cancel-certs"),
+
+  overlayQuit: el("overlay-quit"),
+  btnQuitStay: el("btn-quit-stay"),
+  btnQuitForce: el("btn-quit-force"),
 };
+
+// Un identifiant absent du HTML donnerait `null` ici, et la premiere ligne
+// qui s'en sert casserait tout le script — donc une fenetre inerte, sans
+// rien dans l'interface pour dire pourquoi.
+const missing = Object.entries(els)
+  .filter(([, node]) => !node)
+  .map(([key]) => key);
+if (missing.length) {
+  fatal("Interface incomplète (" + missing.join(", ") + "). Réinstalle l'application.");
+}
 
 const overlays = [
   els.overlayPrereqs,
@@ -213,13 +240,13 @@ function attachDetail(id, { title, steps, detail }) {
   if (detail) {
     const toggle = document.createElement("button");
     toggle.className = "tech-toggle";
-    toggle.textContent = "+ Details techniques";
+    toggle.textContent = "+ Détails techniques";
     const body = document.createElement("pre");
     body.className = "tech-body hidden";
     body.textContent = detail;
     toggle.addEventListener("click", () => {
       const hidden = body.classList.toggle("hidden");
-      toggle.textContent = hidden ? "+ Details techniques" : "− Details techniques";
+      toggle.textContent = hidden ? "+ Détails techniques" : "− Détails techniques";
     });
     box.append(toggle, body);
   }
@@ -268,6 +295,9 @@ function setRunning(state) {
   els.btnStart.classList.toggle("hidden", state);
   els.btnCancel.classList.toggle("hidden", !state);
   els.prereq.classList.toggle("hidden", state);
+  // Plus rien ne tourne : la question « fermer quand meme ? » n'a plus
+  // lieu d'etre, la fermeture ne coupe plus rien.
+  if (!state) els.overlayQuit.classList.add("hidden");
 }
 
 function startUpdate() {
@@ -286,7 +316,7 @@ function startUpdate() {
   els.resultActions.classList.add("hidden");
   els.progressFill.classList.remove("ok", "err");
   els.progressFill.style.width = "0%";
-  els.statusText.textContent = "Demarrage...";
+  els.statusText.textContent = "Démarrage...";
   setPill("run", "EN COURS");
   setProgress(null);
   setRunning(true);
@@ -306,7 +336,7 @@ function normalizeFailure(e) {
     title: "Erreur inattendue",
     steps: [
       "Relance l'injection.",
-      "Si le probleme se repete, copie le rapport et envoie-le au developpeur.",
+      "Si le problème se répète, copie le rapport et envoie-le au développeur.",
     ],
     detail: typeof e === "string" ? e : JSON.stringify(e),
     cancelled: false,
@@ -322,14 +352,14 @@ function showFailure(f) {
   // la premiere etape, la premiere ligne fait l'affaire.
   const target = currentStage || STAGES[0].id;
 
-  setStepState(target, cancelled ? "idle" : "err", cancelled ? "ARRETE" : "ECHEC");
+  setStepState(target, cancelled ? "idle" : "err", cancelled ? "ARRÊTÉ" : "ÉCHEC");
   attachDetail(target, {
     title: f.title,
     steps: f.steps || [],
     detail: cancelled ? null : f.detail,
   });
 
-  setPill(cancelled ? "idle" : "err", cancelled ? "ARRETE" : "ECHEC");
+  setPill(cancelled ? "idle" : "err", cancelled ? "ARRÊTÉ" : "ÉCHEC");
   els.statusText.textContent = f.title;
   els.progressFill.classList.remove("indeterminate");
   if (!cancelled) {
@@ -349,13 +379,13 @@ function showSuccess(payload) {
 
   for (const s of STAGES) setStepState(s.id, "ok", "OK");
   attachDetail(STAGES[STAGES.length - 1].id, {
-    title: (payload && payload.title) || "Injection terminee",
+    title: (payload && payload.title) || "Injection terminée",
     steps: (payload && payload.steps) || [],
     detail: null,
   });
 
-  setPill("ok", "TERMINE");
-  els.statusText.textContent = "Injection terminee";
+  setPill("ok", "TERMINÉ");
+  els.statusText.textContent = "Injection terminée";
   els.progressFill.classList.remove("indeterminate", "err");
   els.progressFill.classList.add("ok");
   els.progressFill.style.width = "100%";
@@ -375,11 +405,52 @@ els.btnCancelPassword.addEventListener("click", cancelUpdate);
 els.btnCancel2fa.addEventListener("click", cancelUpdate);
 els.btnCancelCerts.addEventListener("click", cancelUpdate);
 
+els.btnQuitStay.addEventListener("click", () => {
+  els.overlayQuit.classList.add("hidden");
+  invoke("cancel_quit").catch(() => {});
+});
+els.btnQuitForce.addEventListener("click", () => {
+  els.overlayQuit.classList.add("hidden");
+  invoke("force_quit").catch(() => {});
+});
+
 // Echap ferme la question en cours, ce qui revient a annuler le flux :
 // une fenetre modale sans issue au clavier est un piege classique.
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && anyOverlayVisible()) cancelUpdate();
+  if (e.key !== "Escape") return;
+  if (!els.overlayQuit.classList.contains("hidden")) {
+    els.overlayQuit.classList.add("hidden");
+    invoke("cancel_quit").catch(() => {});
+  } else if (anyOverlayVisible()) {
+    cancelUpdate();
+  }
 });
+
+// La WebView2 se comporte par defaut comme un navigateur : menu
+// contextuel, F5, Ctrl+R, recherche dans la page. Recharger l'interface
+// en pleine injection la remet a zero alors que l'installation, elle,
+// continue cote systeme : l'ecran repasse sur « Pret » pendant qu'un
+// transfert tourne toujours, et le bouton relance repond « une
+// installation est deja en cours ». Ces raccourcis n'ont de toute facon
+// aucun sens dans un outil.
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener(
+  "keydown",
+  (e) => {
+    const key = String(e.key).toLowerCase();
+    const ctrl = e.ctrlKey || e.metaKey;
+    const blocked =
+      key === "f5" ||
+      key === "f7" ||
+      (ctrl && ["r", "p", "f", "g", "u", "j", "o", "s"].includes(key)) ||
+      (ctrl && e.shiftKey && ["r", "i", "j", "c"].includes(key));
+    if (blocked) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  },
+  true
+);
 
 // --- Rapport de bug ---
 invoke("log_file_path")
@@ -394,20 +465,20 @@ function buildReport() {
   const lines = [
     "Kosp Injection — rapport",
     "Date : " + new Date().toISOString(),
-    "Appareil : " + (deviceLabel || "non detecte"),
-    "Etape : " + (currentStage || "aucune"),
+    "Appareil : " + (deviceLabel || "non détecté"),
+    "Étape : " + (currentStage || "aucune"),
     "",
     "Erreur : " + (f.title || "aucune"),
   ];
   if (f.steps && f.steps.length) {
-    lines.push("", "Pistes proposees :");
+    lines.push("", "Pistes proposées :");
     for (const s of f.steps) lines.push("  - " + s);
   }
   if (trace.length) {
-    lines.push("", "Etapes traversees :");
+    lines.push("", "Étapes traversées :");
     for (const t of trace) lines.push("  " + t);
   }
-  if (f.detail) lines.push("", "Detail technique :", f.detail);
+  if (f.detail) lines.push("", "Détail technique :", f.detail);
   return lines.join("\n");
 }
 
@@ -433,7 +504,7 @@ els.btnCopy.addEventListener("click", async () => {
     }
     document.body.removeChild(ta);
   }
-  flash(els.btnCopy, ok ? "Rapport copie" : "Copie impossible", "Copier le rapport");
+  flash(els.btnCopy, ok ? "Rapport copié" : "Copie impossible", "Copier le rapport");
 });
 
 els.btnLog.addEventListener("click", () => {
@@ -523,7 +594,7 @@ function renderTwofaMethods(numbers) {
   els.twofaMethods.innerHTML = "";
 
   els.twofaMethods.appendChild(
-    listItem("Sur mes appareils Apple", "iPhone, iPad ou Mac connectes au compte", () => {
+    listItem("Sur mes appareils Apple", "iPhone, iPad ou Mac connectés au compte", () => {
       els.overlay2fa.classList.add("hidden");
       invoke("submit_2fa", { action: "devices" }).catch(() => {});
     })
@@ -657,7 +728,7 @@ listen("need-device", (e) => {
   els.deviceList.innerHTML = "";
   for (const dev of e.payload || []) {
     els.deviceList.appendChild(
-      listItem(dev.name, dev.usb ? "USB" : "Reseau", () => {
+      listItem(dev.name, dev.usb ? "USB" : "Réseau", () => {
         els.overlayDevice.classList.add("hidden");
         invoke("submit_device", { udid: dev.udid }).catch(() => {});
       })
@@ -689,7 +760,7 @@ listen("need-password", (e) => {
   } else {
     els.inputAppleId.value = "";
     els.modalSubId.textContent =
-      "Identifiants du compte Apple gratuit utilise pour signer l'app.";
+      "Identifiants du compte Apple gratuit utilisé pour signer l'app.";
   }
   els.inputPassword.value = "";
   els.overlayPassword.classList.remove("hidden");
@@ -720,12 +791,12 @@ listen("need-2fa", (e) => {
     return;
   }
 
-  els.twofaTitle.textContent = "Code de verification";
+  els.twofaTitle.textContent = "Code de vérification";
   els.twofaChoiceBlock.classList.add("hidden");
   els.twofaCodeBlock.classList.remove("hidden");
   els.twofaSub.textContent = p.sms
-    ? "Entre le code a 6 chiffres recu par SMS."
-    : "Entre le code a 6 chiffres affiche sur tes appareils Apple.";
+    ? "Entre le code à 6 chiffres reçu par SMS."
+    : "Entre le code à 6 chiffres affiché sur tes appareils Apple.";
   els.overlay2fa.classList.remove("hidden");
   els.input2fa.focus();
 });
@@ -766,6 +837,15 @@ listen("need-certs", (e) => {
 
 listen("done", (e) => showSuccess(e.payload));
 
+// Fermeture de la fenetre demandee alors qu'une injection tourne : le
+// backend a suspendu la fermeture et attend la reponse.
+listen("confirm-quit", () => els.overlayQuit.classList.remove("hidden"));
+
 // ---------------------------------------------------------------------------
 
 buildPipeline();
+
+// Trace de reference dans le journal : si cette ligne manque, c'est que
+// l'interface elle-meme n'a pas demarre, et il est inutile de chercher la
+// panne du cote de l'iPhone ou du compte Apple.
+invoke("ui_ready").catch(() => {});

@@ -14,21 +14,21 @@
         <span class="product">KOSP INJECTION</span>
         <span class="subtitle">Injecteur iOS &middot; TwitNinf</span>
       </div>
-      <span class="pill" id="state-pill" data-state="idle">PRET</span>
+      <span class="pill" id="state-pill" data-state="idle">PRÊT</span>
     </header>
 
     <div class="devicebar">
       <span class="dev-dot" id="dev-dot"></span>
-      <span class="dev-label" id="dev-label">Aucun appareil detecte</span>
+      <span class="dev-label" id="dev-label">Aucun appareil détecté</span>
       <span class="dev-meta mono" id="dev-meta"></span>
     </div>
 
     <section class="prereq" id="prereq">
       <span class="sec-label">Avant de lancer</span>
       <ul>
-        <li>iPhone branche en USB &mdash; cable de donnees, port du PC, sans hub</li>
-        <li>Ecran deverrouille et allume pendant toute l'operation</li>
-        <li>&laquo;&nbsp;Se fier a cet ordinateur&nbsp;&raquo; accepte sur l'iPhone</li>
+        <li>iPhone branché en USB &mdash; câble de données, port du PC, sans hub</li>
+        <li>Écran déverrouillé et allumé pendant toute l'opération</li>
+        <li>&laquo;&nbsp;Se fier à cet ordinateur&nbsp;&raquo; accepté sur l'iPhone</li>
       </ul>
     </section>
 
@@ -56,7 +56,7 @@
 
   <div class="overlay hidden" id="overlay-prereqs">
     <div class="modal">
-      <span class="sec-label">Prerequis systeme</span>
+      <span class="sec-label">Prérequis système</span>
       <h2>Composants Apple manquants</h2>
       <p class="modal-sub" id="prereqs-message"></p>
       <p class="modal-sub" id="prereqs-detail"></p>
@@ -68,8 +68,8 @@
   <div class="overlay hidden" id="overlay-device">
     <div class="modal">
       <span class="sec-label">Cible</span>
-      <h2>Plusieurs appareils detectes</h2>
-      <p class="modal-sub">Choisis celui a mettre a jour.</p>
+      <h2>Plusieurs appareils détectés</h2>
+      <p class="modal-sub">Choisis celui à mettre à jour.</p>
       <div class="list" id="device-list"></div>
       <button class="btn btn-ghost" id="btn-cancel-device">Annuler</button>
     </div>
@@ -79,7 +79,7 @@
     <div class="modal">
       <span class="sec-label">Signature</span>
       <h2>Compte Apple</h2>
-      <p class="modal-sub">Choisis un compte enregistre.</p>
+      <p class="modal-sub">Choisis un compte enregistré.</p>
       <div class="list" id="account-list"></div>
       <button class="btn btn-ghost" id="btn-add-account">Utiliser un autre compte</button>
       <button class="btn btn-ghost" id="btn-cancel-account">Annuler</button>
@@ -91,24 +91,24 @@
       <span class="sec-label">Signature</span>
       <h2>Connexion Apple ID</h2>
       <p class="notice hidden" id="password-note"></p>
-      <p class="modal-sub" id="modal-sub-id">Identifiants du compte Apple gratuit utilise pour signer l'app.</p>
+      <p class="modal-sub" id="modal-sub-id">Identifiants du compte Apple gratuit utilisé pour signer l'app.</p>
       <input class="field" type="email" id="input-apple-id" placeholder="Apple ID" autocomplete="off" spellcheck="false" />
       <input class="field" type="password" id="input-password" placeholder="Mot de passe" autocomplete="off" />
       <p class="field-error hidden" id="password-error"></p>
       <button class="btn btn-primary" id="btn-submit-password">Continuer</button>
       <button class="btn btn-ghost" id="btn-cancel-password">Annuler</button>
-      <p class="foot-note">Mot de passe enregistre dans le Gestionnaire d'identification Windows, chiffre pour ta session.</p>
+      <p class="foot-note">Mot de passe enregistré dans le Gestionnaire d'identification Windows, chiffré pour ta session.</p>
     </div>
   </div>
 
   <div class="overlay hidden" id="overlay-2fa">
     <div class="modal">
-      <span class="sec-label">Verification</span>
-      <h2 id="twofa-title">Code de verification</h2>
+      <span class="sec-label">Vérification</span>
+      <h2 id="twofa-title">Code de vérification</h2>
       <p class="notice hidden" id="twofa-note"></p>
 
       <div id="twofa-code-block">
-        <p class="modal-sub" id="twofa-sub">Entre le code a 6 chiffres affiche sur tes appareils Apple.</p>
+        <p class="modal-sub" id="twofa-sub">Entre le code à 6 chiffres affiché sur tes appareils Apple.</p>
         <input class="field field-code mono" type="text" inputmode="numeric" maxlength="6" id="input-2fa" placeholder="000000" autocomplete="one-time-code" />
         <p class="field-error hidden" id="twofa-error"></p>
         <button class="btn btn-primary" id="btn-submit-2fa">Valider</button>
@@ -116,7 +116,7 @@
       </div>
 
       <div id="twofa-choice-block" class="hidden">
-        <p class="modal-sub">Apple n'a pas indique par ou envoyer le code. Choisis un canal.</p>
+        <p class="modal-sub">Apple n'a pas indiqué par où envoyer le code. Choisis un canal.</p>
         <div class="list" id="twofa-methods"></div>
       </div>
 
@@ -124,14 +124,24 @@
     </div>
   </div>
 
+  <div class="overlay hidden" id="overlay-quit">
+    <div class="modal">
+      <span class="sec-label">Injection en cours</span>
+      <h2>Fermer maintenant ?</h2>
+      <p class="modal-sub">Une injection est en cours. Fermer la fenêtre l'interrompt&nbsp;: l'app peut rester à moitié installée sur l'iPhone, et il faudra tout reprendre depuis le début.</p>
+      <button class="btn btn-primary" id="btn-quit-stay">Continuer l'injection</button>
+      <button class="btn btn-ghost" id="btn-quit-force">Interrompre et fermer</button>
+    </div>
+  </div>
+
   <div class="overlay hidden" id="overlay-certs">
     <div class="modal modal-wide">
       <span class="sec-label">Certificats</span>
       <h2>Limite atteinte</h2>
-      <p class="modal-sub">Apple limite un compte gratuit a 2 certificats. Choisis celui a revoquer pour liberer une place.</p>
+      <p class="modal-sub">Apple limite un compte gratuit à 2 certificats. Choisis celui à révoquer pour libérer une place.</p>
       <div class="list" id="cert-list"></div>
-      <p class="notice">Revoquer un certificat casse les apps signees avec, sur les autres ordinateurs.</p>
-      <button class="btn btn-primary" id="btn-submit-certs" disabled>Revoquer et continuer</button>
+      <p class="notice">Révoquer un certificat casse les apps signées avec, sur les autres ordinateurs.</p>
+      <button class="btn btn-primary" id="btn-submit-certs" disabled>Révoquer et continuer</button>
       <button class="btn btn-ghost" id="btn-cancel-certs">Annuler</button>
     </div>
   </div>

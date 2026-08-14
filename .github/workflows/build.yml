@@ -1,6 +1,6 @@
 name: Build & Publish Kosp Injection
 
-# A chaque push sur main : compile l'exe Windows (runtime C en statique,
+# A chaque push sur master : compile l'exe Windows (runtime C en statique,
 # voir .cargo/config.toml — pas besoin de VCRUNTIME140.dll sur le poste
 # cible) et publie directement la nouvelle version sur le launcher de
 # production, en maj forcee, avec le message du commit comme notes de
@@ -13,12 +13,41 @@ on:
 jobs:
   build-and-publish:
     runs-on: windows-latest
-    timeout-minutes: 30
+    # L'edition liee (lto = "thin") allonge la compilation : la marge
+    # d'origine, 30 minutes, ne laissait pas de place a un cache froid.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Sans cache, chaque push recompile ~600 dependances depuis zero.
+      - uses: Swatinem/rust-cache@v2
+
+      # La version publiee sur le launcher etait 1.0.<run>, alors que
+      # l'executable annoncait 0.1.0 dans ses proprietes Windows : le
+      # numero affiche par le systeme ne correspondait a rien. On aligne
+      # les deux avant de compiler.
+      - name: Aligner le numero de version
+        shell: pwsh
+        run: |
+          $version = "1.0.${{ github.run_number }}"
+          $manifest = Get-Content Cargo.toml -Raw
+          $manifest = $manifest -replace '(?m)^version = "[^"]*"', "version = ""$version"""
+          Set-Content Cargo.toml $manifest -Encoding utf8 -NoNewline
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "version = $version"
+
+      # Le code est actuellement sans le moindre avertissement : tout ce qui
+      # apparait ici est nouveau, donc a regarder. L'etape ne bloque pas la
+      # publication pour autant — une mise a jour de Rust qui ajoute un
+      # nouveau lint ne doit pas empecher une correction urgente de partir.
+      - name: Controle qualite (clippy)
+        continue-on-error: true
+        run: cargo clippy --release --all-targets -- -D warnings
 
       - name: Build (release)
         run: cargo build --release
@@ -27,6 +56,8 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path target/release/twitninf-updater.exe -DestinationPath kosp-win32.zip -Force
+          $info = (Get-Item target/release/twitninf-updater.exe).VersionInfo
+          Write-Host "FileVersion embarquee : $($info.FileVersion)"
 
       - name: Publier sur le launcher
         shell: bash
@@ -37,7 +68,6 @@ jobs:
           set -euo pipefail
           API="http://51.210.11.74:8080/api/admin"
           SLUG="kosp-injection"
-          VERSION="1.0.${{ github.run_number }}"
 
           printf '%s' "$COMMIT_MSG" > notes.txt
 

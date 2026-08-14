@@ -3,3 +3,7 @@
 *.log
 icons/icon.png
 kosp-win32.zip
+# Maquettes d'interface ouvertes directement dans un navigateur. Elles ne
+# doivent surtout pas vivre dans ui/ : ce dossier est embarque tel quel
+# dans l'executable, page de test comprise.
+/dev
