@@ -11,9 +11,11 @@
     "windows": [
       {
         "title": "Kosp Injection",
-        "width": 480,
-        "height": 640,
-        "resizable": false,
+        "width": 460,
+        "height": 700,
+        "minWidth": 400,
+        "minHeight": 560,
+        "resizable": true,
         "center": true,
         "decorations": true
       }

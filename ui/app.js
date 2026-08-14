@@ -1,254 +1,754 @@
-const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
+// Toute la logique d'affichage. Regle du fichier : rien ne s'affiche a
+// l'ecran sans etre une phrase que le testeur peut suivre. Les objets
+// d'erreur venus du backend (`{title, steps, detail, cancelled}`) sont la
+// seule source des messages d'echec — pas de texte technique invente ici.
+
+const tauri = window.__TAURI__;
+
+// Sans le pont Tauri, aucun bouton ne repondrait et l'app aurait l'air
+// simplement figee. Mieux vaut le dire.
+if (!tauri || !tauri.core || !tauri.event) {
+  document.body.innerHTML =
+    '<div style="padding:40px;font-family:Segoe UI,sans-serif;color:#E9EBEE">' +
+    "<h2>L'application n'a pas pu demarrer</h2>" +
+    "<p>Le moteur d'affichage n'a pas charge le pont interne. Redemarre l'application ; " +
+    "si le probleme persiste, redemarre le PC.</p></div>";
+  throw new Error("pont Tauri indisponible");
+}
+
+const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
+const listen = (name, handler) => tauri.event.listen(name, handler);
+const el = (id) => document.getElementById(id);
+
+/** Les sept etapes du pipeline. Les identifiants doivent rester alignes
+ *  avec les appels a `stage(...)` du backend Rust. */
+const STAGES = [
+  { id: "drivers", name: "Composants Apple" },
+  { id: "device", name: "Detection de l'iPhone" },
+  { id: "version", name: "Derniere version publiee" },
+  { id: "download", name: "Telechargement de l'app" },
+  { id: "account", name: "Compte Apple & certificat" },
+  { id: "sign", name: "Signature de l'app" },
+  { id: "install", name: "Injection sur l'iPhone" },
+];
 
 const els = {
-  cardIdle: document.getElementById("card-idle"),
-  cardProgress: document.getElementById("card-progress"),
-  cardResult: document.getElementById("card-result"),
-  btnStart: document.getElementById("btn-start"),
-  btnAgain: document.getElementById("btn-again"),
-  statusText: document.getElementById("status-text"),
-  spinner: document.getElementById("spinner"),
-  progressFill: document.getElementById("progress-fill"),
-  progressPct: document.getElementById("progress-pct"),
-  resultIcon: document.getElementById("result-icon"),
-  resultText: document.getElementById("result-text"),
+  statePill: el("state-pill"),
+  devDot: el("dev-dot"),
+  devLabel: el("dev-label"),
+  devMeta: el("dev-meta"),
+  prereq: el("prereq"),
+  pipeline: el("pipeline"),
 
-  btnCancelProgress: document.getElementById("btn-cancel-progress"),
+  statusText: el("status-text"),
+  progressPct: el("progress-pct"),
+  progressFill: el("progress-fill"),
 
-  overlayPrereqs: document.getElementById("overlay-prereqs"),
-  prereqsMessage: document.getElementById("prereqs-message"),
-  prereqsDetail: document.getElementById("prereqs-detail"),
-  btnPrereqsYes: document.getElementById("btn-prereqs-yes"),
-  btnPrereqsNo: document.getElementById("btn-prereqs-no"),
+  btnStart: el("btn-start"),
+  btnCancel: el("btn-cancel-progress"),
+  resultActions: el("result-actions"),
+  btnCopy: el("btn-copy"),
+  btnLog: el("btn-log"),
 
-  overlayDevice: document.getElementById("overlay-device"),
-  deviceList: document.getElementById("device-list"),
-  btnCancelDevice: document.getElementById("btn-cancel-device"),
+  overlayPrereqs: el("overlay-prereqs"),
+  prereqsMessage: el("prereqs-message"),
+  prereqsDetail: el("prereqs-detail"),
+  btnPrereqsYes: el("btn-prereqs-yes"),
+  btnPrereqsNo: el("btn-prereqs-no"),
 
-  overlayAccount: document.getElementById("overlay-account"),
-  accountList: document.getElementById("account-list"),
-  btnAddAccount: document.getElementById("btn-add-account"),
-  btnCancelAccount: document.getElementById("btn-cancel-account"),
+  overlayDevice: el("overlay-device"),
+  deviceList: el("device-list"),
+  btnCancelDevice: el("btn-cancel-device"),
 
-  overlayPassword: document.getElementById("overlay-password"),
-  modalSubId: document.getElementById("modal-sub-id"),
-  inputAppleId: document.getElementById("input-apple-id"),
-  inputPassword: document.getElementById("input-password"),
-  btnSubmitPassword: document.getElementById("btn-submit-password"),
-  btnCancelPassword: document.getElementById("btn-cancel-password"),
+  overlayAccount: el("overlay-account"),
+  accountList: el("account-list"),
+  btnAddAccount: el("btn-add-account"),
+  btnCancelAccount: el("btn-cancel-account"),
 
-  overlay2fa: document.getElementById("overlay-2fa"),
-  input2fa: document.getElementById("input-2fa"),
-  btnSubmit2fa: document.getElementById("btn-submit-2fa"),
-  btnResend2fa: document.getElementById("btn-resend-2fa"),
-  btnCancel2fa: document.getElementById("btn-cancel-2fa"),
+  overlayPassword: el("overlay-password"),
+  passwordNote: el("password-note"),
+  passwordError: el("password-error"),
+  modalSubId: el("modal-sub-id"),
+  inputAppleId: el("input-apple-id"),
+  inputPassword: el("input-password"),
+  btnSubmitPassword: el("btn-submit-password"),
+  btnCancelPassword: el("btn-cancel-password"),
 
-  overlayCerts: document.getElementById("overlay-certs"),
-  certList: document.getElementById("cert-list"),
-  btnSubmitCerts: document.getElementById("btn-submit-certs"),
-  btnCancelCerts: document.getElementById("btn-cancel-certs"),
+  overlay2fa: el("overlay-2fa"),
+  twofaTitle: el("twofa-title"),
+  twofaNote: el("twofa-note"),
+  twofaSub: el("twofa-sub"),
+  twofaError: el("twofa-error"),
+  twofaCodeBlock: el("twofa-code-block"),
+  twofaChoiceBlock: el("twofa-choice-block"),
+  twofaMethods: el("twofa-methods"),
+  input2fa: el("input-2fa"),
+  btnSubmit2fa: el("btn-submit-2fa"),
+  btnResend2fa: el("btn-resend-2fa"),
+  btnCancel2fa: el("btn-cancel-2fa"),
+
+  overlayCerts: el("overlay-certs"),
+  certList: el("cert-list"),
+  btnSubmitCerts: el("btn-submit-certs"),
+  btnCancelCerts: el("btn-cancel-certs"),
 };
 
-function hideAllOverlays() {
-  for (const o of [els.overlayPrereqs, els.overlayDevice, els.overlayAccount, els.overlayPassword, els.overlay2fa, els.overlayCerts]) {
-    o.classList.add("hidden");
+const overlays = [
+  els.overlayPrereqs,
+  els.overlayDevice,
+  els.overlayAccount,
+  els.overlayPassword,
+  els.overlay2fa,
+  els.overlayCerts,
+];
+
+// Journal des etapes traversees. Sert au bouton « Copier le rapport » :
+// une erreur seule ne dit pas ou l'on en etait quand elle est tombee.
+const trace = [];
+const stepNodes = new Map();
+let running = false;
+let currentStage = null;
+let lastFailure = null;
+let deviceLabel = "";
+let logHintText = "";
+
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
+
+function buildPipeline() {
+  els.pipeline.innerHTML = "";
+  stepNodes.clear();
+
+  STAGES.forEach((s, i) => {
+    const step = document.createElement("section");
+    step.className = "step";
+    step.dataset.state = "idle";
+
+    const head = document.createElement("div");
+    head.className = "step-head";
+
+    const idx = document.createElement("span");
+    idx.className = "step-idx";
+    idx.textContent = String(i + 1).padStart(2, "0");
+
+    const name = document.createElement("span");
+    name.className = "step-name";
+    name.textContent = s.name;
+
+    const state = document.createElement("span");
+    state.className = "step-state";
+    state.textContent = "";
+
+    head.append(idx, name, state);
+    step.appendChild(head);
+    els.pipeline.appendChild(step);
+
+    stepNodes.set(s.id, { step, state });
+  });
+}
+
+function setStepState(id, value, label) {
+  const node = stepNodes.get(id);
+  if (!node) return;
+  node.step.dataset.state = value;
+  node.state.textContent = label || "";
+}
+
+function resetPipeline() {
+  for (const { step, state } of stepNodes.values()) {
+    step.dataset.state = "idle";
+    state.textContent = "";
+    const detail = step.querySelector(".step-detail");
+    if (detail) detail.remove();
   }
+}
+
+/** Marque l'etape active, et toutes les precedentes comme terminees :
+ *  le backend ne signale que l'entree dans une etape, la reussite de la
+ *  precedente se deduit du seul fait qu'on soit passe a la suivante. */
+function enterStage(id) {
+  const index = STAGES.findIndex((s) => s.id === id);
+  if (index < 0) return;
+  currentStage = id;
+  STAGES.forEach((s, i) => {
+    if (i < index) setStepState(s.id, "ok", "OK");
+    else if (i === index) setStepState(s.id, "run", "EN COURS");
+    else setStepState(s.id, "idle", "");
+  });
+  scrollStepIntoView(id);
+}
+
+function scrollStepIntoView(id) {
+  const node = stepNodes.get(id);
+  if (node) node.step.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+/** Accroche un bloc de detail (echec ou reussite) sous une etape. */
+function attachDetail(id, { title, steps, detail }) {
+  const node = stepNodes.get(id);
+  if (!node) return;
+  const existing = node.step.querySelector(".step-detail");
+  if (existing) existing.remove();
+
+  const box = document.createElement("div");
+  box.className = "step-detail";
+
+  const h = document.createElement("p");
+  h.className = "detail-title";
+  h.textContent = title;
+  box.appendChild(h);
+
+  if (steps && steps.length) {
+    const list = document.createElement("ol");
+    list.className = "detail-steps";
+    for (const s of steps) {
+      const li = document.createElement("li");
+      li.textContent = s;
+      list.appendChild(li);
+    }
+    box.appendChild(list);
+  }
+
+  if (detail) {
+    const toggle = document.createElement("button");
+    toggle.className = "tech-toggle";
+    toggle.textContent = "+ Details techniques";
+    const body = document.createElement("pre");
+    body.className = "tech-body hidden";
+    body.textContent = detail;
+    toggle.addEventListener("click", () => {
+      const hidden = body.classList.toggle("hidden");
+      toggle.textContent = hidden ? "+ Details techniques" : "− Details techniques";
+    });
+    box.append(toggle, body);
+  }
+
+  node.step.appendChild(box);
+  box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+// ---------------------------------------------------------------------------
+// Etat global de l'ecran
+// ---------------------------------------------------------------------------
+
+function setPill(state, text) {
+  els.statePill.dataset.state = state;
+  els.statePill.textContent = text;
+}
+
+function hideAllOverlays() {
+  for (const o of overlays) o.classList.add("hidden");
+}
+function anyOverlayVisible() {
+  return overlays.some((o) => !o.classList.contains("hidden"));
 }
 
 function cancelUpdate() {
   hideAllOverlays();
-  invoke("submit_cancel");
+  invoke("submit_cancel").catch(() => {});
 }
 
-function showCard(which) {
-  for (const c of [els.cardIdle, els.cardProgress, els.cardResult]) {
-    c.classList.add("hidden");
+/** `null` = jauge indeterminee : on ne sait pas combien de temps ca prend. */
+function setProgress(value) {
+  if (value === null || value === undefined) {
+    els.progressFill.classList.add("indeterminate");
+    els.progressPct.textContent = "";
+    return;
   }
-  which.classList.remove("hidden");
+  const pct = Math.max(0, Math.min(100, value * 100));
+  els.progressFill.classList.remove("indeterminate");
+  els.progressFill.style.width = pct + "%";
+  els.progressPct.textContent = pct.toFixed(0) + " %";
 }
 
-function setProgress(pct) {
-  const clamped = Math.max(0, Math.min(100, pct));
-  els.progressFill.style.width = clamped + "%";
-  els.progressPct.textContent = clamped.toFixed(1) + " %";
+function setRunning(state) {
+  running = state;
+  els.btnStart.disabled = state;
+  els.btnStart.classList.toggle("hidden", state);
+  els.btnCancel.classList.toggle("hidden", !state);
+  els.prereq.classList.toggle("hidden", state);
 }
 
 function startUpdate() {
-  showCard(els.cardProgress);
+  if (running) return;
+  trace.length = 0;
+  lastFailure = null;
+  currentStage = null;
+  deviceLabel = "";
+  els.devDot.classList.remove("live");
+  els.devLabel.classList.remove("live");
+  els.devLabel.textContent = "Recherche de l'appareil...";
+  els.devMeta.textContent = "";
+
+  hideAllOverlays();
+  resetPipeline();
+  els.resultActions.classList.add("hidden");
+  els.progressFill.classList.remove("ok", "err");
+  els.progressFill.style.width = "0%";
   els.statusText.textContent = "Demarrage...";
-  els.spinner.classList.remove("hidden");
-  setProgress(0);
-  invoke("start_update").catch((e) => showResult(false, String(e)));
+  setPill("run", "EN COURS");
+  setProgress(null);
+  setRunning(true);
+  els.btnStart.textContent = "Relancer l'injection";
+
+  invoke("start_update")
+    .catch((e) => showFailure(normalizeFailure(e)))
+    .finally(() => setRunning(false));
 }
 
-function showResult(ok, message) {
-  showCard(els.cardResult);
-  els.resultIcon.className = "result-icon " + (ok ? "ok" : "err");
-  els.resultIcon.textContent = ok ? "✓" : "✕";
-  els.resultText.textContent = message;
+/** Le backend renvoie un objet structure ; tout le reste est un imprevu
+ *  que l'on presente quand meme proprement plutot que d'afficher
+ *  « [object Object] ». */
+function normalizeFailure(e) {
+  if (e && typeof e === "object" && typeof e.title === "string") return e;
+  return {
+    title: "Erreur inattendue",
+    steps: [
+      "Relance l'injection.",
+      "Si le probleme se repete, copie le rapport et envoie-le au developpeur.",
+    ],
+    detail: typeof e === "string" ? e : JSON.stringify(e),
+    cancelled: false,
+  };
 }
+
+function showFailure(f) {
+  hideAllOverlays();
+  lastFailure = f;
+
+  const cancelled = !!f.cancelled;
+  // L'echec est accroche a l'etape ou il s'est produit ; s'il tombe avant
+  // la premiere etape, la premiere ligne fait l'affaire.
+  const target = currentStage || STAGES[0].id;
+
+  setStepState(target, cancelled ? "idle" : "err", cancelled ? "ARRETE" : "ECHEC");
+  attachDetail(target, {
+    title: f.title,
+    steps: f.steps || [],
+    detail: cancelled ? null : f.detail,
+  });
+
+  setPill(cancelled ? "idle" : "err", cancelled ? "ARRETE" : "ECHEC");
+  els.statusText.textContent = f.title;
+  els.progressFill.classList.remove("indeterminate");
+  if (!cancelled) {
+    els.progressFill.classList.add("err");
+    els.progressFill.style.width = "100%";
+  } else {
+    els.progressFill.style.width = "0%";
+  }
+  els.progressPct.textContent = "";
+  els.resultActions.classList.toggle("hidden", cancelled);
+  els.btnLog.title = logHintText;
+}
+
+function showSuccess(payload) {
+  hideAllOverlays();
+  lastFailure = null;
+
+  for (const s of STAGES) setStepState(s.id, "ok", "OK");
+  attachDetail(STAGES[STAGES.length - 1].id, {
+    title: (payload && payload.title) || "Injection terminee",
+    steps: (payload && payload.steps) || [],
+    detail: null,
+  });
+
+  setPill("ok", "TERMINE");
+  els.statusText.textContent = "Injection terminee";
+  els.progressFill.classList.remove("indeterminate", "err");
+  els.progressFill.classList.add("ok");
+  els.progressFill.style.width = "100%";
+  els.progressPct.textContent = "100 %";
+  els.resultActions.classList.add("hidden");
+}
+
+// ---------------------------------------------------------------------------
+// Boutons
+// ---------------------------------------------------------------------------
 
 els.btnStart.addEventListener("click", startUpdate);
-els.btnAgain.addEventListener("click", startUpdate);
-els.btnCancelProgress.addEventListener("click", cancelUpdate);
+els.btnCancel.addEventListener("click", cancelUpdate);
 els.btnCancelDevice.addEventListener("click", cancelUpdate);
 els.btnCancelAccount.addEventListener("click", cancelUpdate);
 els.btnCancelPassword.addEventListener("click", cancelUpdate);
 els.btnCancel2fa.addEventListener("click", cancelUpdate);
 els.btnCancelCerts.addEventListener("click", cancelUpdate);
 
-// --- Identifiants Apple ---
-els.btnSubmitPassword.addEventListener("click", () => {
-  const appleId = els.inputAppleId.value.trim();
-  const pw = els.inputPassword.value;
-  if (!appleId || !pw) return;
-  els.overlayPassword.classList.add("hidden");
-  invoke("submit_credentials", { appleId, password: pw });
-  els.inputPassword.value = "";
-});
-els.inputPassword.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") els.btnSubmitPassword.click();
+// Echap ferme la question en cours, ce qui revient a annuler le flux :
+// une fenetre modale sans issue au clavier est un piege classique.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && anyOverlayVisible()) cancelUpdate();
 });
 
-// --- 2FA ---
-els.btnSubmit2fa.addEventListener("click", () => {
+// --- Rapport de bug ---
+invoke("log_file_path")
+  .then((p) => {
+    logHintText = "Journal : " + p;
+    els.btnLog.title = logHintText;
+  })
+  .catch(() => {});
+
+function buildReport() {
+  const f = lastFailure || {};
+  const lines = [
+    "Kosp Injection — rapport",
+    "Date : " + new Date().toISOString(),
+    "Appareil : " + (deviceLabel || "non detecte"),
+    "Etape : " + (currentStage || "aucune"),
+    "",
+    "Erreur : " + (f.title || "aucune"),
+  ];
+  if (f.steps && f.steps.length) {
+    lines.push("", "Pistes proposees :");
+    for (const s of f.steps) lines.push("  - " + s);
+  }
+  if (trace.length) {
+    lines.push("", "Etapes traversees :");
+    for (const t of trace) lines.push("  " + t);
+  }
+  if (f.detail) lines.push("", "Detail technique :", f.detail);
+  return lines.join("\n");
+}
+
+els.btnCopy.addEventListener("click", async () => {
+  const text = buildReport();
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch (_) {
+    // Le presse-papiers moderne peut etre refuse dans une WebView selon
+    // le contexte de securite ; le vieux execCommand, lui, passe.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      ok = document.execCommand("copy");
+    } catch (_) {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+  }
+  flash(els.btnCopy, ok ? "Rapport copie" : "Copie impossible", "Copier le rapport");
+});
+
+els.btnLog.addEventListener("click", () => {
+  invoke("open_log").catch((e) => flash(els.btnLog, String(e), "Journal"));
+});
+
+function flash(button, message, restore) {
+  button.textContent = message;
+  setTimeout(() => {
+    button.textContent = restore;
+  }, 2200);
+}
+
+// ---------------------------------------------------------------------------
+// Identifiants Apple
+// ---------------------------------------------------------------------------
+
+function showFieldError(node, message) {
+  node.textContent = message;
+  node.classList.remove("hidden");
+}
+
+function submitPassword() {
+  const appleId = els.inputAppleId.value.trim();
+  const pw = els.inputPassword.value;
+  if (!appleId) {
+    showFieldError(els.passwordError, "Saisis l'adresse du compte Apple.");
+    els.inputAppleId.focus();
+    return;
+  }
+  if (!appleId.includes("@")) {
+    showFieldError(els.passwordError, "L'identifiant Apple est une adresse e-mail.");
+    els.inputAppleId.focus();
+    return;
+  }
+  if (!pw) {
+    showFieldError(els.passwordError, "Saisis le mot de passe du compte Apple.");
+    els.inputPassword.focus();
+    return;
+  }
+  els.passwordError.classList.add("hidden");
+  els.overlayPassword.classList.add("hidden");
+  invoke("submit_credentials", { appleId, password: pw }).catch(() => {});
+  els.inputPassword.value = "";
+}
+
+els.btnSubmitPassword.addEventListener("click", submitPassword);
+for (const input of [els.inputAppleId, els.inputPassword]) {
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitPassword();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Double authentification
+// ---------------------------------------------------------------------------
+
+function submit2faCode() {
   const code = els.input2fa.value.trim();
-  if (!code) return;
+  if (code.length < 6) {
+    showFieldError(els.twofaError, "Le code compte 6 chiffres.");
+    return;
+  }
+  els.twofaError.classList.add("hidden");
   els.overlay2fa.classList.add("hidden");
-  invoke("submit_2fa", { code });
+  invoke("submit_2fa", { action: "code", code }).catch(() => {});
   els.input2fa.value = "";
+}
+
+els.btnSubmit2fa.addEventListener("click", submit2faCode);
+// Chiffres seulement : coller un code avec des espaces ou un tiret est
+// frequent et donnait un « code incorrect » cote Apple.
+els.input2fa.addEventListener("input", () => {
+  const cleaned = els.input2fa.value.replace(/\D/g, "").slice(0, 6);
+  if (cleaned !== els.input2fa.value) els.input2fa.value = cleaned;
+  if (cleaned.length === 6) submit2faCode();
 });
 els.input2fa.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") els.btnSubmit2fa.click();
+  if (e.key === "Enter") submit2faCode();
 });
 els.btnResend2fa.addEventListener("click", () => {
   els.overlay2fa.classList.add("hidden");
-  invoke("submit_2fa", { code: "__resend__" });
+  invoke("submit_2fa", { action: "resend" }).catch(() => {});
 });
 
-// --- Certificats ---
+function renderTwofaMethods(numbers) {
+  els.twofaMethods.innerHTML = "";
+
+  els.twofaMethods.appendChild(
+    listItem("Sur mes appareils Apple", "iPhone, iPad ou Mac connectes au compte", () => {
+      els.overlay2fa.classList.add("hidden");
+      invoke("submit_2fa", { action: "devices" }).catch(() => {});
+    })
+  );
+
+  for (const n of numbers) {
+    els.twofaMethods.appendChild(
+      listItem("Par SMS", n.label, () => {
+        els.overlay2fa.classList.add("hidden");
+        invoke("submit_2fa", { action: "sms", numberId: n.id }).catch(() => {});
+      })
+    );
+  }
+}
+
+/** Ligne cliquable commune aux listes (appareils, comptes, canaux 2FA). */
+function listItem(name, meta, onClick) {
+  const item = document.createElement("div");
+  item.className = "list-item";
+
+  const text = document.createElement("div");
+  text.className = "item-text";
+  const n = document.createElement("span");
+  n.className = "item-name";
+  n.textContent = name;
+  text.appendChild(n);
+  if (meta) {
+    const m = document.createElement("span");
+    m.className = "item-meta";
+    m.textContent = meta;
+    text.appendChild(m);
+  }
+  item.appendChild(text);
+  item.addEventListener("click", onClick);
+  return item;
+}
+
+// ---------------------------------------------------------------------------
+// Certificats
+// ---------------------------------------------------------------------------
+
 let selectedCerts = new Set();
 els.btnSubmitCerts.addEventListener("click", () => {
   if (selectedCerts.size === 0) return;
   els.overlayCerts.classList.add("hidden");
-  invoke("submit_cert_choice", { serials: Array.from(selectedCerts) });
+  invoke("submit_cert_choice", { serials: Array.from(selectedCerts) }).catch(() => {});
 });
 
-// --- Composants Apple manquants ---
+// ---------------------------------------------------------------------------
+// Prerequis Apple
+// ---------------------------------------------------------------------------
+
 els.btnPrereqsYes.addEventListener("click", () => {
   els.overlayPrereqs.classList.add("hidden");
-  invoke("submit_confirm", { ok: true });
+  invoke("submit_confirm", { ok: true }).catch(() => {});
 });
 els.btnPrereqsNo.addEventListener("click", () => {
   els.overlayPrereqs.classList.add("hidden");
-  invoke("submit_confirm", { ok: false });
+  invoke("submit_confirm", { ok: false }).catch(() => {});
 });
+
+// ---------------------------------------------------------------------------
+// Comptes enregistres
+// ---------------------------------------------------------------------------
+
+els.btnAddAccount.addEventListener("click", () => {
+  els.overlayAccount.classList.add("hidden");
+  invoke("submit_account_choice", { appleId: null }).catch(() => {});
+});
+
+function renderAccounts(accounts) {
+  els.accountList.innerHTML = "";
+  for (const id of accounts) {
+    const item = listItem(id, null, () => {
+      els.overlayAccount.classList.add("hidden");
+      invoke("submit_account_choice", { appleId: id }).catch(() => {});
+    });
+
+    const forget = document.createElement("button");
+    forget.className = "icon-btn";
+    forget.title = "Oublier ce compte";
+    forget.textContent = "×";
+    forget.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      await invoke("forget_account", { appleId: id }).catch(() => {});
+      const left = await invoke("list_saved_accounts").catch(() => []);
+      if (!left.length) {
+        // Plus aucun compte enregistre : la liste vide n'aurait rien a
+        // proposer, on enchaine directement sur la saisie manuelle.
+        els.overlayAccount.classList.add("hidden");
+        invoke("submit_account_choice", { appleId: null }).catch(() => {});
+      } else {
+        renderAccounts(left);
+      }
+    });
+    item.appendChild(forget);
+    els.accountList.appendChild(item);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Evenements emis par le backend Rust
+// ---------------------------------------------------------------------------
+
+listen("stage", (e) => enterStage(e.payload));
+
+listen("status", (e) => {
+  els.statusText.textContent = e.payload;
+  const last = trace[trace.length - 1];
+  if (last !== e.payload) trace.push(e.payload);
+});
+
+listen("progress", (e) => setProgress(e.payload));
+
+listen("device", (e) => {
+  const p = e.payload || {};
+  deviceLabel = `${p.name || "iPhone"} — iOS ${p.ios || "?"}`;
+  els.devDot.classList.add("live");
+  els.devLabel.classList.add("live");
+  els.devLabel.textContent = p.name || "iPhone";
+  els.devMeta.textContent = "iOS " + (p.ios || "?");
+});
+
 listen("need-prereqs", (e) => {
   els.prereqsMessage.textContent = e.payload.message;
   els.prereqsDetail.textContent = e.payload.detail;
   els.overlayPrereqs.classList.remove("hidden");
 });
 
-// --- Choix de compte Apple ---
-els.btnAddAccount.addEventListener("click", () => {
-  els.overlayAccount.classList.add("hidden");
-  invoke("submit_account_choice", { appleId: null });
-});
-listen("need-account", (e) => {
-  els.accountList.innerHTML = "";
-  for (const id of e.payload) {
-    const item = document.createElement("div");
-    item.className = "cert-item";
-
-    const text = document.createElement("div");
-    text.className = "cert-item-text";
-    const name = document.createElement("span");
-    name.className = "cert-item-name";
-    name.textContent = id;
-    text.appendChild(name);
-    item.appendChild(text);
-
-    item.addEventListener("click", () => {
-      els.overlayAccount.classList.add("hidden");
-      invoke("submit_account_choice", { appleId: id });
-    });
-    els.accountList.appendChild(item);
-  }
-  els.overlayAccount.classList.remove("hidden");
-});
-
-// --- Choix d'appareil ---
 listen("need-device", (e) => {
   els.deviceList.innerHTML = "";
-  for (const dev of e.payload) {
-    const item = document.createElement("div");
-    item.className = "cert-item";
-
-    const text = document.createElement("div");
-    text.className = "cert-item-text";
-    const name = document.createElement("span");
-    name.className = "cert-item-name";
-    name.textContent = dev.name;
-    text.appendChild(name);
-    item.appendChild(text);
-
-    item.addEventListener("click", () => {
-      els.overlayDevice.classList.add("hidden");
-      invoke("submit_device", { udid: dev.udid });
-    });
-    els.deviceList.appendChild(item);
+  for (const dev of e.payload || []) {
+    els.deviceList.appendChild(
+      listItem(dev.name, dev.usb ? "USB" : "Reseau", () => {
+        els.overlayDevice.classList.add("hidden");
+        invoke("submit_device", { udid: dev.udid }).catch(() => {});
+      })
+    );
   }
   els.overlayDevice.classList.remove("hidden");
 });
 
-// --- Evenements emis par le backend Rust ---
-listen("status", (e) => {
-  els.statusText.textContent = e.payload;
-});
-
-listen("progress", (e) => {
-  setProgress(e.payload * 100);
+listen("need-account", (e) => {
+  renderAccounts(e.payload || []);
+  els.overlayAccount.classList.remove("hidden");
 });
 
 listen("need-password", (e) => {
-  const knownId = e.payload.appleId;
+  const payload = e.payload || {};
+  const knownId = payload.appleId;
+  els.passwordError.classList.add("hidden");
+
+  if (payload.note) {
+    els.passwordNote.textContent = payload.note;
+    els.passwordNote.classList.remove("hidden");
+  } else {
+    els.passwordNote.classList.add("hidden");
+  }
+
   if (knownId) {
     els.inputAppleId.value = knownId;
-    els.inputAppleId.readOnly = true;
-    els.modalSubId.textContent = "Session existante pour " + knownId;
+    els.modalSubId.textContent = "Ressaisis le mot de passe de " + knownId + ".";
   } else {
     els.inputAppleId.value = "";
-    els.inputAppleId.readOnly = false;
-    els.modalSubId.textContent = "Identifiants du compte Apple gratuit utilise pour signer l'app.";
+    els.modalSubId.textContent =
+      "Identifiants du compte Apple gratuit utilise pour signer l'app.";
   }
+  els.inputPassword.value = "";
   els.overlayPassword.classList.remove("hidden");
   (knownId ? els.inputPassword : els.inputAppleId).focus();
 });
 
-listen("need-2fa", () => {
+listen("need-2fa", (e) => {
+  const p = e.payload || {};
+  els.twofaError.classList.add("hidden");
+  els.input2fa.value = "";
+
+  if (p.error) {
+    els.twofaNote.textContent = p.error;
+    els.twofaNote.classList.remove("hidden");
+  } else {
+    els.twofaNote.classList.add("hidden");
+  }
+
+  if (p.unknown) {
+    // Etat particulier : Apple n'a pas dit par ou passer. Envoyer un code
+    // maintenant fait echouer la connexion — il faut d'abord choisir un
+    // canal, sinon l'app se bloque sur une erreur incomprehensible.
+    els.twofaTitle.textContent = "Comment recevoir le code ?";
+    els.twofaCodeBlock.classList.add("hidden");
+    els.twofaChoiceBlock.classList.remove("hidden");
+    renderTwofaMethods(p.numbers || []);
+    els.overlay2fa.classList.remove("hidden");
+    return;
+  }
+
+  els.twofaTitle.textContent = "Code de verification";
+  els.twofaChoiceBlock.classList.add("hidden");
+  els.twofaCodeBlock.classList.remove("hidden");
+  els.twofaSub.textContent = p.sms
+    ? "Entre le code a 6 chiffres recu par SMS."
+    : "Entre le code a 6 chiffres affiche sur tes appareils Apple.";
   els.overlay2fa.classList.remove("hidden");
   els.input2fa.focus();
 });
 
 listen("need-certs", (e) => {
   selectedCerts = new Set();
+  els.btnSubmitCerts.disabled = true;
   els.certList.innerHTML = "";
-  for (const cert of e.payload) {
+  for (const cert of e.payload || []) {
     const item = document.createElement("label");
-    item.className = "cert-item";
+    item.className = "list-item";
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     item.appendChild(checkbox);
 
     const text = document.createElement("div");
-    text.className = "cert-item-text";
+    text.className = "item-text";
     const name = document.createElement("span");
-    name.className = "cert-item-name";
+    name.className = "item-name";
     name.textContent = cert.name;
     const machine = document.createElement("span");
-    machine.className = "cert-item-meta";
+    machine.className = "item-meta";
     machine.textContent = cert.machine;
     text.append(name, machine);
     item.appendChild(text);
@@ -257,16 +757,15 @@ listen("need-certs", (e) => {
       item.classList.toggle("selected", checkbox.checked);
       if (checkbox.checked) selectedCerts.add(cert.serial);
       else selectedCerts.delete(cert.serial);
+      els.btnSubmitCerts.disabled = selectedCerts.size === 0;
     });
     els.certList.appendChild(item);
   }
   els.overlayCerts.classList.remove("hidden");
 });
 
-listen("done", (e) => {
-  showResult(true, e.payload);
-});
+listen("done", (e) => showSuccess(e.payload));
 
-listen("failed", (e) => {
-  showResult(false, e.payload);
-});
+// ---------------------------------------------------------------------------
+
+buildPipeline();
